@@ -352,9 +352,12 @@ const isPendingService = (record: Record<string, unknown>): boolean => {
 };
 
 const getServiceStatus = (record: Record<string, unknown>): string => {
-	const status = readText(record, [
+	const status = [
 		"approvalStatus", "serviceStatus", "status", "statusName", "reviewStatus", "submissionStatus",
-	]).toLowerCase();
+	]
+		.map((field) => readText(record, [field]))
+		.find(Boolean)
+		?.toLowerCase() ?? "";
 	if (status === "1") return "draft";
 	if (status === "2") return "submitted";
 	if (status === "3") return "under review";
@@ -384,9 +387,12 @@ const getDueDate = (record: Record<string, unknown>): number | undefined => {
 };
 
 const getClearedDate = (record: Record<string, unknown>): number | undefined => {
-	const value = readText(record, [
+	const value = [
 		"clearedAt", "clearanceDate", "completedAt", "completionDate", "completedDate",
-	]);
+		"deliveredAt", "deliveryDate", "lastUpdateDate", "updatedAt",
+	]
+		.map((field) => readText(record, [field]))
+		.find(Boolean);
 	if (!value) return undefined;
 	const timestamp = Date.parse(value);
 	return Number.isNaN(timestamp) ? undefined : timestamp;
@@ -407,20 +413,23 @@ const deriveDueWithin48Hours = (services: Record<string, unknown>[], now: number
 };
 
 const deriveClearedThisMonth = (services: Record<string, unknown>[], now: Date): number | undefined => {
+	if (services.length === 0) return 0;
+
 	const statuses = services.map(getServiceStatus);
 	if (statuses.every((status) => !status)) return undefined;
 	const cleared = services
 		.map((service, index) => ({ service, status: statuses[index] }))
 		.filter(({ status }) =>
-			["approved", "complete", "completed", "cleared"].some((value) => status.includes(value)),
+			["complete", "completed", "cleared"].some((value) => status.includes(value)),
 		);
+	if (cleared.length === 0) return 0;
 	if (cleared.some(({ service }) => getClearedDate(service) === undefined)) return undefined;
 
+	const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+	const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
 	return cleared.filter(({ service }) => {
 		const date = getClearedDate(service);
-		if (date === undefined) return false;
-		const clearedAt = new Date(date);
-		return clearedAt.getFullYear() === now.getFullYear() && clearedAt.getMonth() === now.getMonth();
+		return date !== undefined && date >= monthStart && date < nextMonthStart;
 	}).length;
 };
 

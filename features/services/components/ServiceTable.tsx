@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, type FormEvent } from "react";
+import React, { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useShallow } from "zustand/react/shallow";
@@ -19,6 +19,7 @@ import {
   ArrowUpDown,
   LoaderCircle,
   MessageSquarePlus,
+  Calendar,
 } from "lucide-react";
 
 function ServiceRow({
@@ -28,6 +29,7 @@ function ServiceRow({
   renderRiskBadge,
   managerView,
   visibleColumns,
+  nowTimestamp,
 }: {
   row: ServiceRecord;
   lang: string;
@@ -35,6 +37,7 @@ function ServiceRow({
   renderRiskBadge: (channel: RiskChannel) => React.ReactNode;
   managerView: boolean;
   visibleColumns: ServiceColumn[];
+  nowTimestamp: number | null;
 }) {
   const [formOpen, setFormOpen] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -43,9 +46,36 @@ function ServiceRow({
   const [success, setSuccess] = useState(false);
   const addComplianceFeedback = useAssessorStore((state) => state.addComplianceFeedback);
   const serviceId = Number(row.shipmentId ?? row.id);
-  const managerServiceId = row.shipmentId && /^\d+$/.test(row.shipmentId) ? row.shipmentId : null;
   const canSubmit = Number.isInteger(serviceId) && serviceId > 0;
   const visibleColumnCount = visibleColumns.length;
+
+  const displayId =
+    row.serviceCode && row.serviceCode !== "Service reference unavailable"
+      ? row.serviceCode
+      : row.referenceNumber && !/^[0-9a-f-]{16,}$/i.test(row.referenceNumber)
+        ? row.referenceNumber
+        : "Service reference unavailable";
+  const formattedImporterCode = row.importerCode
+    ? (/^CUS-/i.test(row.importerCode) ? row.importerCode : `CUS-${row.importerCode}`)
+    : "";
+  const slaLabel = (() => {
+    if (row.status === "Completed" || row.status === "Delivered") return "Closed";
+    if (row.slaDeadline && nowTimestamp !== null) {
+      const deadline = new Date(row.slaDeadline);
+      if (!Number.isNaN(deadline.getTime())) {
+        const daysRemaining = Math.ceil((deadline.getTime() - nowTimestamp) / 86_400_000);
+        if (daysRemaining < 0) return `Overdue ${Math.abs(daysRemaining)}d`;
+        if (daysRemaining === 0) return "Due today";
+        return `${daysRemaining}d left`;
+      }
+    }
+    return row.sla || "SLA unavailable";
+  })();
+  const slaIsOverdue =
+    slaLabel.startsWith("Overdue") || (!row.slaDeadline && row.isOverdue === true);
+  const slaIsUrgent =
+    slaLabel === "Due today" ||
+    (/^\d+d left$/.test(slaLabel) && Number.parseInt(slaLabel, 10) <= 3);
 
   const submitFeedback = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -66,79 +96,145 @@ function ServiceRow({
 
   return (
     <>
-      <tr className="transition-colors hover:bg-slate-50/60">
-        {visibleColumns.includes("service") && <td className={`px-4 ${managerView ? "py-4" : "py-3.5"}`}>
-          <div className="flex items-center gap-2">
-            {managerView && managerServiceId ? (
-              <Link
-                href={`/${lang}/admin/manager/services/${encodeURIComponent(managerServiceId)}`}
-                className="font-semibold text-sky-700 hover:underline"
-              >
-                {row.id}
-              </Link>
-            ) : managerView ? (
-              <span className="font-semibold text-slate-500" title="A numeric service ID is required to open service details.">
-                {row.id}
+      <tr className="transition-colors hover:bg-slate-50/80">
+        {/* 1. SERVICE COLUMN */}
+        {visibleColumns.includes("service") && (
+          <td className={`px-4 ${managerView ? "py-3.5" : "py-3"} max-w-[220px]`}>
+            <div className="flex items-center gap-2">
+              {managerView ? (
+                <Link
+                  href={`/${lang}/admin/manager/services/${encodeURIComponent(row.shipmentId ?? row.id)}`}
+                  className="font-semibold text-sky-700 hover:underline truncate"
+                  title={displayId}
+                >
+                  {displayId}
+                </Link>
+              ) : (
+                <Link
+                  href={`/${lang}/admin/assessor/services/${encodeURIComponent(row.shipmentId ?? row.id)}`}
+                  className="font-semibold text-sky-700 hover:underline truncate"
+                  title={displayId}
+                >
+                  {displayId}
+                </Link>
+              )}
+              {!managerView && (
+                <button
+                  type="button"
+                  disabled={!canSubmit}
+                  onClick={() => {
+                    setFormOpen((open) => !open);
+                    setSuccess(false);
+                    setError(null);
+                  }}
+                  aria-label={`Send compliance feedback for ${row.id}`}
+                  title={canSubmit ? "Compliance feedback" : "Feedback unavailable: missing numeric service ID"}
+                  className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <MessageSquarePlus className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            <span className="text-slate-500 text-[11px] block mt-0.5 truncate" title={row.title}>
+              {row.title || "Cargo description unavailable"}
+            </span>
+          </td>
+        )}
+
+        {/* 2. IMPORTER COLUMN */}
+        {visibleColumns.includes("importer") && (
+          <td className={`px-4 whitespace-nowrap ${managerView ? "py-3.5" : "py-3"}`}>
+            <span className="font-semibold text-slate-800 block text-xs">
+              {row.importerName || "Importer unavailable"}
+            </span>
+            <span className="text-[11px] font-mono text-slate-400 block mt-0.5">
+              {formattedImporterCode || "Customer code unavailable"}
+            </span>
+          </td>
+        )}
+
+        {/* 3. MODE COLUMN */}
+        {visibleColumns.includes("mode") && (
+          <td className={`px-4 whitespace-nowrap font-medium text-slate-600 text-xs ${managerView ? "py-3.5" : "py-3"}`}>
+            <span className="inline-block px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px]">
+              {row.mode === "Unknown" ? "Mode unavailable" : row.mode}
+            </span>
+          </td>
+        )}
+
+        {/* 4. STATUS COLUMN */}
+        {visibleColumns.includes("status") && (
+          <td className={`px-4 whitespace-nowrap ${managerView ? "py-3.5" : "py-3"}`}>
+            {renderStatusBadge(row.status)}
+          </td>
+        )}
+
+        {/* 5. RISK COLUMN (ቀይ የተሰመረበት ቦታ) */}
+        {visibleColumns.includes("risk") && (
+          <td className={`px-4 whitespace-nowrap ${managerView ? "py-3.5" : "py-3"}`}>
+            {renderRiskBadge(row.riskChannel)}
+          </td>
+        )}
+
+        {/* 6. CASE EXECUTOR COLUMN */}
+        {visibleColumns.includes("caseExecutor") && (
+          <td className={`px-4 whitespace-nowrap font-medium text-slate-700 text-xs ${managerView ? "py-3.5" : "py-3"}`}>
+            {row.caseExecutor && row.caseExecutor !== "—" ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-5 h-5 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center text-[10px] font-bold">
+                  {row.caseExecutor.slice(0, 1)}
+                </span>
+                {row.caseExecutor}
               </span>
             ) : (
-              <Link
-                href={`/${lang}/admin/assessor/services/${encodeURIComponent(row.shipmentId ?? row.id)}`}
-                className="font-semibold text-sky-700 hover:underline"
-              >
-                {row.id}
-              </Link>
+              <span className="text-slate-400 text-xs italic">Unassigned</span>
             )}
-            {!managerView && (
-              <button
-                type="button"
-                disabled={!canSubmit}
-                onClick={() => {
-                  setFormOpen((open) => !open);
-                  setSuccess(false);
-                  setError(null);
-                }}
-                aria-label={`Send compliance feedback for ${row.id}`}
-                title={canSubmit ? "Compliance feedback" : "Feedback unavailable: missing numeric service ID"}
-                className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <MessageSquarePlus className="h-3.5 w-3.5" />
-              </button>
+          </td>
+        )}
+
+        {/* 7. ETA COLUMN (ቀይ የተሰመረበት ዳሽ ቦታ) */}
+        {visibleColumns.includes("eta") && (
+          <td className={`px-4 whitespace-nowrap text-slate-600 text-xs ${managerView ? "py-3.5" : "py-3"}`}>
+            {row.eta && row.eta !== "ETA unavailable" ? (
+              <span className="inline-flex items-center gap-1">
+                <Calendar className="w-3 h-3 text-slate-400" />
+                {row.eta}
+              </span>
+            ) : (
+              <span className="text-slate-400 text-xs">ETA unavailable</span>
             )}
-          </div>
-          <span className="text-slate-500 text-[11px] block mt-0.5">
-            {row.title}
-          </span>
-        </td>}
-        {visibleColumns.includes("importer") && <td className={`px-4 ${managerView ? "py-4" : "py-3.5"}`}>
-          <span className="font-semibold text-slate-800 block">
-            {row.importerName}
-          </span>
-          <span className="text-[11px] font-mono text-slate-400 block mt-0.5">
-            {row.importerCode}
-          </span>
-        </td>}
-        {visibleColumns.includes("mode") && <td className={`px-4 font-medium text-slate-700 ${managerView ? "py-4" : "py-3.5"}`}>{row.mode}</td>}
-        {visibleColumns.includes("status") && <td className={`px-4 ${managerView ? "py-4" : "py-3.5"}`}>{renderStatusBadge(row.status)}</td>}
-        {visibleColumns.includes("risk") && <td className={`px-4 ${managerView ? "py-4" : "py-3.5"}`}>{renderRiskBadge(row.riskChannel)}</td>}
-        {visibleColumns.includes("caseExecutor") && <td className={`px-4 font-medium text-slate-800 ${managerView ? "py-4" : "py-3.5"}`}>
-          {row.caseExecutor}
-        </td>}
-        {visibleColumns.includes("eta") && <td className={`px-4 text-slate-700 ${managerView ? "py-4" : "py-3.5"}`}>{row.eta}</td>}
-        {visibleColumns.includes("sla") && <td className={`px-4 ${managerView ? "py-4" : "py-3.5"}`}>
-          <span
-            className={`font-semibold ${
-              row.isOverdue
-                ? "text-rose-600"
-                : row.sla === "Closed"
-                ? "text-slate-400 font-normal"
-                : "text-amber-700"
-            }`}
-          >
-            {row.sla}
-          </span>
-        </td>}
-        {visibleColumns.includes("updated") && <td className={`px-4 text-slate-400 ${managerView ? "py-4" : "py-3.5"}`}>{row.updated}</td>}
+          </td>
+        )}
+
+        {/* 8. SLA COLUMN (ቀይ የተሰመረበት ዳሽ ቦታ) */}
+        {visibleColumns.includes("sla") && (
+          <td className={`px-4 whitespace-nowrap ${managerView ? "py-3.5" : "py-3"}`}>
+            {slaLabel ? (
+              <span
+                className={`font-medium px-2 py-0.5 rounded text-[11px] ${
+                  slaIsOverdue
+                    ? "bg-rose-50 text-rose-700 border border-rose-200"
+                    : slaLabel === "Closed" || slaLabel === "SLA unavailable"
+                    ? "bg-slate-100 text-slate-500"
+                    : slaIsUrgent
+                      ? "bg-amber-50 text-amber-800 border border-amber-200"
+                      : "bg-slate-100 text-slate-600 border border-slate-200"
+                }`}
+              >
+                {slaLabel}
+              </span>
+            ) : <span className="text-slate-400 text-xs">SLA unavailable</span>}
+          </td>
+        )}
+
+        {/* 9. UPDATED COLUMN */}
+        {visibleColumns.includes("updated") && (
+          <td className={`px-4 whitespace-nowrap text-slate-400 text-xs ${managerView ? "py-3.5" : "py-3"}`}>
+            {row.updated && row.updated !== "—" ? row.updated : "Update time unavailable"}
+          </td>
+        )}
       </tr>
+
       {!managerView && formOpen && (
         <tr>
           <td colSpan={visibleColumnCount} className="bg-slate-50 px-4 py-3">
@@ -184,7 +280,14 @@ export function ServiceTable({
   onPageChange?: (page: number) => void;
 } = {}) {
   const [updatedSort, setUpdatedSort] = useState<"asc" | "desc">("desc");
+  const [nowTimestamp, setNowTimestamp] = useState<number | null>(null);
   const { lang } = useParams<{ lang: string }>();
+  useEffect(() => {
+    const updateTimestamp = () => setNowTimestamp(Date.now());
+    updateTimestamp();
+    const interval = window.setInterval(updateTimestamp, 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
   const filteredData = useServiceStore(useShallow((state) => state.getFilteredServices()));
   const services = useServiceStore((state) => state.services);
   const visibleColumns = useServiceStore((state) => state.visibleColumns);
@@ -225,8 +328,8 @@ export function ServiceTable({
         );
       case "Pending":
         return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
-            <Clock className="w-3 h-3 text-slate-500" />
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+            <Clock className="w-3 h-3 text-blue-500" />
             {status}
           </span>
         );
@@ -234,21 +337,6 @@ export function ServiceTable({
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200">
             <Lock className="w-3 h-3 text-rose-500" />
-            {status}
-          </span>
-        );
-      case "Draft":
-      case "Cancelled":
-        return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
-            {status}
-          </span>
-        );
-      case "Submitted":
-      case "Under review":
-        return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200">
-            <Clock className="w-3 h-3 text-amber-600" />
             {status}
           </span>
         );
@@ -268,11 +356,10 @@ export function ServiceTable({
             {status}
           </span>
         );
-      case "Unknown":
       default:
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
-            {status}
+            {status === "Unknown" ? "Status unavailable" : status || "Status unavailable"}
           </span>
         );
     }
@@ -311,8 +398,9 @@ export function ServiceTable({
       case "Unassigned":
       default:
         return (
-          <span className="inline-flex items-center px-2.5 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
-            {channel}
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-medium bg-slate-50 text-slate-600 border border-slate-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+            Unclassified
           </span>
         );
     }
@@ -325,28 +413,32 @@ export function ServiceTable({
           {error}
         </p>
       )}
-      <div className="overflow-x-auto">
-        <table className={`w-full border-collapse text-left ${managerView ? "min-w-280" : ""}`}>
+
+      {/* ቴብሉ እንዳይለጠጥ overflow-x-auto እና ተገቢውን ስፋት ሰጥተነዋል */}
+      <div className="overflow-x-auto w-full">
+        <table className="w-full border-collapse text-left">
           <thead>
-            <tr className="border-b border-slate-200 bg-slate-50/50 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-              {visibleColumns.includes("service") && <th className="py-3 px-4">SERVICE</th>}
-              {visibleColumns.includes("importer") && <th className="py-3 px-4">IMPORTER</th>}
+            <tr className="border-b border-slate-200 bg-slate-50/75 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+              {visibleColumns.includes("service") && <th className="py-3 px-4 min-w-[160px]">SERVICE</th>}
+              {visibleColumns.includes("importer") && <th className="py-3 px-4 min-w-[140px]">IMPORTER</th>}
               {visibleColumns.includes("mode") && <th className="py-3 px-4">MODE</th>}
               {visibleColumns.includes("status") && <th className="py-3 px-4">STATUS</th>}
               {visibleColumns.includes("risk") && <th className="py-3 px-4">RISK</th>}
               {visibleColumns.includes("caseExecutor") && <th className="py-3 px-4">CASE EXECUTOR</th>}
               {visibleColumns.includes("eta") && <th className="py-3 px-4">ETA</th>}
               {visibleColumns.includes("sla") && <th className="py-3 px-4">SLA</th>}
-              {visibleColumns.includes("updated") && <th className="py-3 px-4">
-                <button
-                  type="button"
-                  onClick={() => setUpdatedSort((direction) => direction === "desc" ? "asc" : "desc")}
-                  className="flex items-center gap-1"
-                  aria-label={`Sort updated date ${updatedSort === "desc" ? "oldest first" : "newest first"}`}
-                >
-                  UPDATED <ArrowUpDown className="w-3 h-3 text-slate-400" />
-                </button>
-              </th>}
+              {visibleColumns.includes("updated") && (
+                <th className="py-3 px-4">
+                  <button
+                    type="button"
+                    onClick={() => setUpdatedSort((direction) => (direction === "desc" ? "asc" : "desc"))}
+                    className="flex items-center gap-1 font-bold text-slate-500 uppercase"
+                    aria-label={`Sort updated date ${updatedSort === "desc" ? "oldest first" : "newest first"}`}
+                  >
+                    UPDATED <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                  </button>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody className={`divide-y divide-slate-100 ${managerView ? "text-[13px]" : "text-xs"}`}>
@@ -371,17 +463,20 @@ export function ServiceTable({
                       : "No services match your filters."}
                 </td>
               </tr>
-            ) : sortedData.map((row) => (
-              <ServiceRow
-                key={row.id}
-                row={row}
-                lang={lang}
-                renderStatusBadge={renderStatusBadge}
-                renderRiskBadge={renderRiskBadge}
-                managerView={managerView}
-                visibleColumns={visibleColumns}
-              />
-            ))}
+            ) : (
+              sortedData.map((row) => (
+                <ServiceRow
+                  key={row.id}
+                  row={row}
+                  lang={lang}
+                  renderStatusBadge={renderStatusBadge}
+                  renderRiskBadge={renderRiskBadge}
+                  managerView={managerView}
+                  visibleColumns={visibleColumns}
+                  nowTimestamp={nowTimestamp}
+                />
+              ))
+            )}
           </tbody>
         </table>
       </div>
@@ -411,6 +506,7 @@ export function ServiceTable({
           >
             Next
           </button>
+
         </div>
       </div>
     </div>

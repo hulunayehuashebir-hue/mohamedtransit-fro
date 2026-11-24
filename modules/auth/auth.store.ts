@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { deleteTokens, storeToken } from "../utils/token/client-token.storage";
 import { getUserData, removeUserData, setUserData } from "../utils/token/user.storage";
 import {
+  AdminResetPasswordRequest,
   AuthState,
   AuthStore,
   ChangePasswordRequest,
@@ -24,7 +25,7 @@ import {
   signup,
   updateAccountProfile,
 } from "./auth.endpoint";
-
+import { getAuthErrorMessage } from "./auth-errors";
 const storedUser = typeof window !== "undefined" ? getUserData() : null;
 
 const defaultInitState: AuthState = {
@@ -33,14 +34,29 @@ const defaultInitState: AuthState = {
   loading: false,
 };
 
-const getErrorMessage = (error: unknown, fallback: string): string => {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  return fallback;
-};
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const getErrorMessage = (error: unknown, fallback: string): string => {
+  if (isRecord(error)) {
+    const response = isRecord(error.response) ? error.response : undefined;
+    const data = isRecord(response?.data) ? response.data : undefined;
+    const errors = data?.errors;
+    const firstError = Array.isArray(errors) ? errors[0] : undefined;
+    if (typeof firstError === "string" && firstError.trim()) {
+      return firstError.trim();
+    }
+    if (isRecord(firstError)) {
+      const message = firstError.message;
+      if (typeof message === "string" && message.trim()) return message.trim();
+    }
+    if (typeof data?.message === "string" && data.message.trim()) {
+      return data.message.trim();
+    }
+  }
+
+  return getAuthErrorMessage(error) ?? fallback;
+};
 
 const unwrapAccountProfile = (value: unknown): Record<string, unknown> => {
   let current = value;
@@ -99,6 +115,21 @@ const readProfileRole = (value: unknown): string | undefined => {
   }
   if (isRecord(value)) {
     return readProfileText(value, "name", "roleName", "role");
+  }
+  return undefined;
+};
+
+const readPositiveUserId = (...values: unknown[]): number | undefined => {
+  for (const value of values) {
+    const normalized = typeof value === "number"
+      ? String(value)
+      : typeof value === "string"
+        ? value.trim()
+        : "";
+    if (!/^[1-9]\d*$/.test(normalized)) continue;
+
+    const userId = Number(normalized);
+    if (Number.isSafeInteger(userId)) return userId;
   }
   return undefined;
 };
@@ -220,13 +251,18 @@ const extractUserPayload = (responseData: unknown): LoginPayload | null => {
 const buildUserFromPayload = (payload: LoginPayload | null | undefined, fallbackUsername?: string): IUser => {
   const source = payload ?? {};
   const roles = (source.roles ?? source.userRoles ?? []) as unknown[];
-  const firstRole = extractRoleName(roles);
+  const roleNames = [extractRoleName(roles), extractRoleName(source)];
+  const firstRole =
+    roleNames.find((role) => {
+      const normalized = role.toLowerCase().replace(/[^a-z]/g, "");
+      return normalized.includes("customer") || normalized.includes("importer");
+    }) ?? roleNames.find(Boolean);
+  const userId = readPositiveUserId(source.userId, source.UserId, source.id, source.sub);
 
   return {
-    id: (source.id as string | number | undefined)
-      ?? (source.userId as string | number | undefined)
-      ?? (source.UserId as string | number | undefined)
-      ?? "user-1",
+    id: userId,
+    userId,
+    UserId: userId,
     email: (source.email as string | undefined) ?? fallbackUsername ?? "",
     username: (source.username as string | undefined) ?? (source.userName as string | undefined) ?? fallbackUsername ?? "",
     firstName: (source.firstName as string | undefined) ?? "",
@@ -241,6 +277,8 @@ const buildUserFromPayload = (payload: LoginPayload | null | undefined, fallback
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
   ...defaultInitState,
+
+  clearError: () => set({ error: null }),
 
   login: async (payload: ILogin) => {
     set({ loading: true, error: null });
@@ -313,9 +351,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         "profilePhoto",
         "avatarUrl",
       );
+      const userId = readPositiveUserId(
+        readProfileField(profile, "userId", "UserId", "id", "accountId"),
+        currentUser.userId,
+        currentUser.UserId,
+        currentUser.id,
+        currentUser.sub,
+      );
       const user: IUser = {
         ...currentUser,
-        id: readProfileText(profile, "userId", "id", "accountId") ?? currentUser.id,
+        id: userId,
+        userId,
+        UserId: userId,
         firstName: readProfileText(profile, "firstName") ?? nameParts[0] ?? currentUser.firstName,
         lastName:
           readProfileText(profile, "lastName") ??
@@ -414,7 +461,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  resetPassword: async (payload: ResetPasswordRequest) => {
+  resetPassword: async (
+    payload: ResetPasswordRequest | AdminResetPasswordRequest | EmailResetPasswordRequest
+  ) => {
     set({ loading: true, error: null });
     try {
       await resetPassword(payload);

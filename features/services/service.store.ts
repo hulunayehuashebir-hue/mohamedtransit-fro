@@ -284,11 +284,15 @@ const formatUpdatedDate = (value: unknown): string => {
 
 const formatDateOnly = (value: unknown): string => {
   const text = readText(value);
-  if (!text) return "—";
+  if (!text) return "ETA unavailable";
   const date = new Date(text);
   return Number.isNaN(date.getTime())
-    ? text
-    : date.toLocaleDateString(undefined, { dateStyle: "medium" });
+    ? "ETA unavailable"
+    : new Intl.DateTimeFormat("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      }).format(date);
 };
 
 const getSla = (
@@ -299,33 +303,30 @@ const getSla = (
 ) => {
   const explicitlyOverdue = overdueValue === true || overdueValue === 1 || overdueValue === "true";
   const providedSla = readText(explicitSla);
-  if (providedSla) {
-    return {
-      sla: providedSla,
-      isOverdue: explicitlyOverdue || providedSla.toLowerCase().includes("overdue"),
-    };
-  }
-
   if (status === "Completed" || status === "Delivered") {
-    return { sla: "Closed", isOverdue: false };
+    return { sla: "Closed", isOverdue: false, daysRemaining: null };
   }
 
   const dueAtText = readText(dueAt);
-  if (!dueAtText) return { sla: "—", isOverdue: false };
-
-  const dueDate = new Date(dueAtText);
-  if (Number.isNaN(dueDate.getTime())) return { sla: "—", isOverdue: false };
-
-  const dueDay = new Date(dueDate.getFullYear(), dueDate.getMonth(), dueDate.getDate()).getTime();
-  const today = new Date();
-  const todayDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-  const daysRemaining = Math.round((dueDay - todayDay) / 86_400_000);
-
-  if (daysRemaining < 0) {
-    return { sla: `${Math.abs(daysRemaining)}d overdue`, isOverdue: true };
+  if (dueAtText) {
+    const dueDate = new Date(dueAtText);
+    if (!Number.isNaN(dueDate.getTime())) {
+      const daysRemaining = Math.ceil((dueDate.getTime() - Date.now()) / 86_400_000);
+      if (daysRemaining < 0) {
+        return { sla: `Overdue ${Math.abs(daysRemaining)}d`, isOverdue: true, daysRemaining };
+      }
+      if (daysRemaining === 0) return { sla: "Due today", isOverdue: false, daysRemaining };
+      return { sla: `${daysRemaining}d left`, isOverdue: explicitlyOverdue, daysRemaining };
+    }
   }
-  if (daysRemaining === 0) return { sla: "Due today", isOverdue: false };
-  return { sla: `${daysRemaining}d left`, isOverdue: false };
+  if (providedSla && !/^on[\s_-]*track$/i.test(providedSla)) {
+    return {
+      sla: providedSla,
+      isOverdue: explicitlyOverdue || providedSla.toLowerCase().includes("overdue"),
+      daysRemaining: null,
+    };
+  }
+  return { sla: "SLA unavailable", isOverdue: false, daysRemaining: null };
 };
 
 const toTimestamp = (value: unknown): number | null => {
@@ -353,30 +354,65 @@ const readDatabaseId = (record: ApiRecord): string => {
   return "";
 };
 
+const normalizeServiceCode = (record: ApiRecord, databaseId: string): string => {
+  const rawCode = readText(readValue(
+    record,
+    "code",
+    "serviceCode",
+    "serviceNumber",
+    "trackingNumber",
+  ));
+  if (rawCode && !/^[0-9a-f-]{16,}$/i.test(rawCode)) return rawCode;
+  if (databaseId) {
+    const createdAt = readText(readValue(record, "createdAt", "createAt", "registeredDate", "registeredAt"));
+    const createdYear = createdAt ? new Date(createdAt).getFullYear() : Number.NaN;
+    const year = Number.isInteger(createdYear) ? createdYear : new Date().getFullYear();
+    return `SVC-${year}-${databaseId.padStart(4, "0")}`;
+  }
+  return "Service reference unavailable";
+};
+
 const mapService = (item: ApiRecord): ServiceRecord | null => {
   const databaseId = readDatabaseId(item);
-  const trackingNumber = readText(readValue(item, "trackingNumber", "serviceNumber"));
-  const id = trackingNumber || databaseId;
+  const trackingNumber = readText(readValue(item, "trackingNumber", "serviceNumber", "serviceCode", "code"));
+  const id = databaseId || trackingNumber;
   if (!id) return null;
+  const serviceCode = normalizeServiceCode(item, databaseId);
 
-  const importer = readValue(item, "importer");
-  const customer = readValue(item, "customer");
+  const importer = readValue(item, "importer", "importerProfile", "importerDetails", "importer_detail");
+  const customer = readValue(item, "customer", "customerProfile", "importer");
   const importerFirstName = readNestedText(importer, "firstName");
   const importerLastName = readNestedText(importer, "lastName");
   const importerName =
-    readText(readValue(item, "importerName", "businessName")) ||
-    readNestedText(customer, "businessName", "companyName", "importerName") ||
-    readNestedText(importer, "businessName", "fullName") ||
+    readText(readValue(item, "importerName", "importer_name", "businessName", "companyName")) ||
+    readNestedText(customer, "name", "businessName", "companyName", "importerName") ||
+    readNestedText(importer, "name", "businessName", "fullName") ||
     [importerFirstName, importerLastName].filter(Boolean).join(" ") ||
     readNestedText(importer, "username") ||
-    "—";
-  const executor = readValue(item, "assignedCaseExecutor", "caseExecutor");
+    "";
+  const assignedStaff = readValue(item, "assignedStaff", "assigned_staff");
+  const executor = readValue(item, "assignedCaseExecutor", "assignedExecutor", "caseExecutor", "executor")
+    ?? (assignedStaff && typeof assignedStaff === "object" && !Array.isArray(assignedStaff)
+      ? readValue(assignedStaff as ApiRecord, "executor")
+      : undefined);
   const referenceNumber = readText(
-    readValue(item, "referenceNumber", "serviceReference", "clientReference", "externalReference"),
+    readValue(item, "referenceNumber", "reference_number", "serviceReference", "clientReference", "externalReference"),
   );
-  const updatedAt = readValue(item, "updatedAt") ?? readValue(item, "createAt", "createdAt");
-  const eta = readValue(item, "eta", "estimatedArrival", "expectedArrival", "dueAt");
-  const dueAt = readValue(item, "dueAt", "slaDueAt");
+  const createdAt = readValue(item, "createAt", "createdAt", "registeredDate", "registeredAt");
+  const updatedAt = readValue(item, "updatedAt", "lastUpdateDate") ?? createdAt;
+  const consignment = readValue(item, "consignment", "consignmentDetails", "consignment_detail");
+  const eta = readValue(item, "eta", "estimatedArrival", "estimated_arrival", "expectedArrival", "arrivalDate") ??
+    readValue(
+      consignment && typeof consignment === "object" && !Array.isArray(consignment)
+        ? consignment as ApiRecord
+        : {},
+      "eta",
+      "estimatedArrival",
+      "estimated_arrival",
+      "expectedArrival",
+      "arrivalDate",
+    );
+  const dueAt = readValue(item, "dueAt", "slaDueAt", "slaDeadline", "sla_deadline", "deadline", "targetDate");
   const status = normalizeRegisterStatus(item);
   const sla = getSla(
     dueAt,
@@ -386,8 +422,10 @@ const mapService = (item: ApiRecord): ServiceRecord | null => {
   );
   const executorFirstName = readNestedText(executor, "firstName");
   const executorLastName = readNestedText(executor, "lastName");
-  const executorName = [executorFirstName, executorLastName].filter(Boolean).join(" ");
-  const commodity = readText(readValue(item, "commodity", "goodsDescription", "cargoDescription"));
+  const executorName =
+    readNestedText(executor, "name") ||
+    [executorFirstName, executorLastName].filter(Boolean).join(" ");
+  const commodity = readText(readValue(item, "commodity", "goodsDescription", "cargoDescription", "cargo_description"));
 
   return {
     id,
@@ -395,27 +433,39 @@ const mapService = (item: ApiRecord): ServiceRecord | null => {
     ...(referenceNumber ? { referenceNumber } : {}),
     title:
       [
-        readValue(item, "description"),
+        readValue(item, "description", "cargoDescription", "cargo_description"),
         readValue(item, "title"),
         commodity,
       ]
         .map(readText)
-        .find(Boolean) || "—",
+        .find(Boolean) || "Cargo description unavailable",
     ...(commodity ? { commodity } : {}),
     importerName,
     importerCode:
-      readText(readValue(item, "importerCode", "customerReference", "customerCode", "tinNumber", "tin")) ||
-      readNestedText(customer, "tinNumber", "tin", "customerCode") ||
-      readText(readValue(item, "importerId", "customerId")) ||
-      "—",
+      readText(readValue(item, "importerCode", "importer_code", "customerCode", "customer_code")) ||
+      readNestedText(customer, "customerCode", "customer_code", "importerCode") ||
+      readNestedText(importer, "customerCode", "customer_code", "importerCode") ||
+      "",
     mode: normalizeMode(
       readValue(item, "mode", "transportMode") ?? readValue(item, "serviceType", "type"),
     ),
     status,
-    riskChannel: normalizeRisk(readValue(item, "riskLevel") ?? readValue(item, "riskChannel")),
+    riskChannel: normalizeRisk(readValue(
+      item,
+      "risk_channel",
+      "riskChannel",
+      "riskChannelName",
+      "risk_channel_name",
+      "customsChannel",
+      "channelName",
+      "riskLevel",
+    )),
     caseExecutor: executorName || readNestedText(executor, "username") || "—",
     eta: formatDateOnly(eta),
     sla: sla.sla,
+    ...(readText(dueAt) ? { slaDeadline: readText(dueAt) } : {}),
+    serviceCode,
+    slaDaysRemaining: sla.daysRemaining,
     ...(sla.isOverdue ? { isOverdue: true } : {}),
     updated: formatUpdatedDate(updatedAt),
     updatedAtTimestamp: toTimestamp(updatedAt),
@@ -428,18 +478,40 @@ const mapManagerService = (item: ManagerExecutorAssignment): ServiceRecord | nul
 
   return mapService({
     id: item.id,
-    trackingNumber: item.trackingNumber,
-    description: item.description,
+    trackingNumber: item.code || item.trackingNumber || "",
+    serviceCode: item.code,
+    code: item.code,
+    referenceNumber: item.reference_number,
+    description: item.cargo_description || item.description,
+    cargoDescription: item.cargo_description,
+    routeSummary: item.route_summary,
+    origin: item.origin,
+    destination: item.destination,
+    transitPort: item.transitPort,
     importer: item.importer,
     importerName: item.importerName,
     importerId: item.importerId,
+    customerCode: item.importer?.customer_code,
     mode: mode !== "Unknown" ? mode : serviceType,
     status: item.status,
-    riskLevel: item.riskLevel,
-    assignedCaseExecutor: item.assignedCaseExecutor,
+    riskChannel: item.risk_channel,
+    riskLevel: item.risk_channel ?? item.riskLevel,
+    assignedCaseExecutor: item.assigned_staff?.executor ?? item.assignedCaseExecutor,
+    assignedStaff: item.assigned_staff,
     createAt: item.createAt,
     updatedAt: item.updatedAt,
     dueAt: item.dueAt,
+    slaDeadline: item.slaDeadline,
+    sla: item.sla,
+    slaPosition: item.slaPosition,
+    isOverdue: item.isOverdue,
+    eta: item.eta,
+    estimatedArrival: item.estimated_arrival,
+    completedAt: item.completedAt,
+    deliveredAt: item.deliveredAt,
+    currentStageStartedAt: item.currentStageStartedAt,
+    isBlocked: item.isBlocked,
+    requiresCustomerAction: item.requiresCustomerAction,
   });
 };
 

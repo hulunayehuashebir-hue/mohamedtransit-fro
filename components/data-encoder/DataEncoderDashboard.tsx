@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -39,7 +39,10 @@ import {
 	useDataEncoderStore,
 	type DataEncoderDashboardMetric,
 } from "@/modules/dataencoder/data-encoder.store";
-import { DataEncoderEndpoints } from "@/modules/dataencoder/data-encoder.endpoint";
+import {
+  DataEncoderEndpoints,
+  type CustomerAccountOption,
+} from "@/modules/dataencoder/data-encoder.endpoint";
 import { useNotificationStore } from "@/features/notifications/notification.store";
 import {
 	readCreatedServiceId,
@@ -74,6 +77,9 @@ interface PendingEncoderService {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+const subscribeToHydration = () => () => {};
+const getClientHydrationSnapshot = () => true;
+const getServerHydrationSnapshot = () => false;
 
 const findValue = (record: Record<string, unknown>, ...names: string[]) => {
   const key = Object.keys(record).find((candidate) =>
@@ -245,7 +251,6 @@ export default function DataEncoderDashboard() {
   const isStandaloneDashboard = pathname.includes("/admin/data-encoder/dashboard");
   const user = useAuthStore((state) => state.user);
   const logout = useAuthStore((state) => state.logout);
-  const authenticatedUserId = useAuthStore((state) => state.user?.id);
   const notifications = useNotificationStore((state) => state.notifications);
   const unreadCount = useNotificationStore((state) => state.unreadCount);
   const notificationsLoading = useNotificationStore((state) => state.loading);
@@ -254,6 +259,9 @@ export default function DataEncoderDashboard() {
   const markNotificationRead = useNotificationStore((state) => state.markAsRead);
   const { dashboardData, unavailableMetrics, loading, error, fetchDashboard } = useDataEncoderStore();
   const [customers, setCustomers] = useState<EncoderCustomer[]>([]);
+  const [customerAccounts, setCustomerAccounts] = useState<CustomerAccountOption[]>([]);
+  const [customerAccountsLoading, setCustomerAccountsLoading] = useState(!isStandaloneDashboard);
+  const [customerAccountsError, setCustomerAccountsError] = useState<string | null>(null);
   const [customersLoading, setCustomersLoading] = useState(true);
   const [customersError, setCustomersError] = useState<string | null>(null);
   const [customerSubmitting, setCustomerSubmitting] = useState(false);
@@ -266,8 +274,14 @@ export default function DataEncoderDashboard() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [activeSection, setActiveSection] = useState("overview");
+  const authHydrated = useSyncExternalStore(
+    subscribeToHydration,
+    getClientHydrationSnapshot,
+    getServerHydrationSnapshot,
+  );
   const shipmentFormRef = useRef<HTMLFormElement>(null);
-  const userName = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.username || user?.email?.split("@")[0] || "Data Encoder";
+  const displayUser = authHydrated ? user : null;
+  const userName = [displayUser?.firstName, displayUser?.lastName].filter(Boolean).join(" ") || displayUser?.username || displayUser?.email?.split("@")[0] || "Data Encoder";
   const userInitials = userName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "DE";
 
   const handleLogout = async () => {
@@ -307,6 +321,34 @@ export default function DataEncoderDashboard() {
     const timeoutId = window.setTimeout(() => void fetchCustomers(), 0);
     return () => window.clearTimeout(timeoutId);
   }, [fetchCustomers, isStandaloneDashboard]);
+
+  useEffect(() => {
+    if (isStandaloneDashboard) return;
+    let mounted = true;
+    void DataEncoderEndpoints.getActiveCustomerAccounts()
+      .then((accounts) => {
+        if (mounted) {
+          setCustomerAccounts(accounts);
+          setCustomerAccountsError(null);
+        }
+      })
+      .catch((accountsError: unknown) => {
+        if (mounted) {
+          setCustomerAccounts([]);
+          setCustomerAccountsError(
+            accountsError instanceof Error
+              ? accountsError.message
+              : "Unable to load active customer accounts.",
+          );
+        }
+      })
+      .finally(() => {
+        if (mounted) setCustomerAccountsLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [isStandaloneDashboard]);
 
   useEffect(() => {
     if (isStandaloneDashboard) return;
@@ -355,9 +397,9 @@ export default function DataEncoderDashboard() {
     const form = event.currentTarget;
     const fields = new FormData(form);
     const payload = Object.fromEntries(fields.entries());
-    const userId = Number(authenticatedUserId);
+    const userId = Number(payload.userId);
     if (!Number.isSafeInteger(userId) || userId <= 0) {
-      setFormError("Your authenticated user ID is unavailable. Sign in again, then retry customer creation.");
+      setFormError("Select an active customer account before creating the customer record.");
       return;
     }
     payload.userId = String(userId);
@@ -888,7 +930,7 @@ export default function DataEncoderDashboard() {
                     <div className="absolute right-0 z-50 mt-2 w-60 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
                       <div className="border-b border-slate-100 px-3 py-3">
                         <p className="truncate text-xs font-semibold text-slate-900">{userName}</p>
-                        <p className="truncate text-xs text-slate-500">{user?.email || user?.username || "Data Encoder"}</p>
+                        <p className="truncate text-xs text-slate-500">{displayUser?.email || displayUser?.username || "Data Encoder"}</p>
                       </div>
                       <Link href={`${encoderBase}/profile`} className="flex items-center gap-2.5 px-3 py-2.5 text-xs text-slate-700 hover:bg-slate-50">
                         <Settings className="h-4 w-4 text-slate-500" />
@@ -982,6 +1024,30 @@ export default function DataEncoderDashboard() {
                     <UsersRound className="h-5 w-5 text-blue-700" />
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-xs font-medium text-slate-700 sm:col-span-2">
+                      Active customer account
+                      <select
+                        name="userId"
+                        required
+                        defaultValue=""
+                        disabled={customerAccountsLoading || customerAccounts.length === 0}
+                        className="mt-1.5 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm disabled:bg-slate-100"
+                      >
+                        <option value="">
+                          {customerAccountsLoading
+                            ? "Loading active customer accounts…"
+                            : customerAccounts.length
+                              ? "Select an active customer account"
+                              : "No active customer accounts available"}
+                        </option>
+                        {customerAccounts.map((account) => (
+                          <option key={account.id} value={account.id}>{account.label}</option>
+                        ))}
+                      </select>
+                      {customerAccountsError && (
+                        <span role="alert" className="mt-1 block text-xs text-rose-700">{customerAccountsError}</span>
+                      )}
+                    </label>
                     {[
                       ["businessName", "Business name", "text"],
                       ["tinNumber", "TIN number", "text"],
@@ -1015,7 +1081,7 @@ export default function DataEncoderDashboard() {
                       <textarea name="businessAddress" required maxLength={500} rows={2} className="mt-1.5 w-full rounded-lg border border-slate-300 p-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
                     </label>
                   </div>
-                  <button type="submit" disabled={customerSubmitting} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60">
+                  <button type="submit" disabled={customerSubmitting || customerAccountsLoading || customerAccounts.length === 0} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60">
                     {customerSubmitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                     {customerSubmitting ? "Saving customer…" : "Create customer record"}
                   </button>

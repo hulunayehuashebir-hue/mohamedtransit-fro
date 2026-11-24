@@ -477,10 +477,23 @@ export const useAssessorStore = create<AssessorState>((set, get) => ({
 
     set({ recordingAssessmentServiceId: payload.serviceId });
     try {
-      await AssessorEndpoints.recordAssessment({
+      const normalizedPayload = {
         ...payload,
         notes: payload.notes?.trim() || null,
-      });
+      };
+      if (payload.stageId !== undefined) {
+        if (!Number.isSafeInteger(payload.stageId) || payload.stageId <= 0) {
+          throw new Error('A valid workflow stage ID is required to record an assessment.');
+        }
+        const status = payload.decision === 'Approved'
+          ? 4
+          : payload.decision === 'Rejected'
+            ? 5
+            : 6;
+        await AssessorEndpoints.updateAssessmentStage({ ...normalizedPayload, status });
+      } else {
+        await AssessorEndpoints.recordAssessment(normalizedPayload);
+      }
       set({ recordingAssessmentServiceId: null });
     } catch (err: unknown) {
       set({ recordingAssessmentServiceId: null });

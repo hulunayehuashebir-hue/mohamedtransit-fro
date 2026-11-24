@@ -17,6 +17,7 @@ export type RecordAssessmentDecision =
 
 export interface RecordAssessmentRequest {
   serviceId: number;
+  stageId?: number;
   decision: RecordAssessmentDecision;
   taxAmount: number;
   dutyAmount: number;

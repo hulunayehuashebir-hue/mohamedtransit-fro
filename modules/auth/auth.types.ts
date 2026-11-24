@@ -34,6 +34,7 @@ export interface IUser {
   username?: string;
   roleName?: string;
   email?: string;
+  user_metadata?: Record<string, unknown>;
   firstName?: string;
   lastName?: string;
   phone?: string;
@@ -123,9 +124,16 @@ export type UserResponse = IUser | IUser[] | Record<string, unknown>;
 
 export interface ForgotPasswordRequest {
   email: string;
+  lang?: "am" | "en";
 }
 
 export interface ResetPasswordRequest {
+  email: string;
+  password: string;
+  newPassword: string;
+}
+
+export interface AdminResetPasswordRequest {
   token: string;
   newPassword: string;
   confirmPassword?: string;
@@ -133,6 +141,7 @@ export interface ResetPasswordRequest {
 
 export interface EmailResetPasswordRequest {
   token: string;
+  code?: string;
   email: string;
   newPassword: string;
 }
@@ -146,6 +155,7 @@ export interface ChangePasswordRequest {
 export type AuthState = { loading: boolean; user: IUser | null; error: string | null };
 
 export type AuthStore = AuthState & {
+  clearError: () => void;
   login: (payload: ILogin) => Promise<IUser>;
   logout: () => Promise<void>;
   refreshAccountProfile: () => Promise<IUser>;
@@ -154,6 +164,8 @@ export type AuthStore = AuthState & {
   signUp: (payload: FormData | IUser) => Promise<void>;
   forgotPassword: (payload: ForgotPasswordRequest) => Promise<void>;
   updatePassword: (payload: ChangePasswordRequest) => Promise<void>;
-  resetPassword: (payload: ResetPasswordRequest) => Promise<void>;
+  resetPassword: (
+    payload: ResetPasswordRequest | AdminResetPasswordRequest | EmailResetPasswordRequest
+  ) => Promise<void>;
   resetPasswordFromEmail: (payload: EmailResetPasswordRequest) => Promise<void>;
 };

@@ -1,19 +1,26 @@
 "use client";
 
-import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, DragEvent } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
   ArrowLeft,
   Check,
   CheckCircle2,
+  CircleDashed,
+  ClipboardCheck,
   Clock3,
   FileText,
+  FileUp,
   LoaderCircle,
   Package,
   RefreshCw,
   RotateCcw,
+  Search,
   ShieldAlert,
+  ShieldCheck,
+  ShieldX,
   Send,
   XCircle,
 } from "lucide-react";
@@ -67,7 +74,7 @@ const getStageEvidenceFiles = (stage: AssessorServiceStage | null): EvidenceFile
   const rawDocuments = readField(stage.details ?? {}, "documents", "stageDocuments");
   if (!Array.isArray(rawDocuments)) return [];
 
-  return rawDocuments.flatMap((value, index) => {
+  return rawDocuments.flatMap((value) => {
     if (!isRecord(value)) return [];
     const rawId = readField(value, "id", "documentId");
     const id = rawId === null || rawId === undefined ? "" : String(rawId).trim();
@@ -77,10 +84,10 @@ const getStageEvidenceFiles = (stage: AssessorServiceStage | null): EvidenceFile
     const rawSubmittedAt = readField(value, "createAt", "createdAt", "createdDate");
     const rawSize = readField(value, "fileSizeBytes", "size");
     return [{
-      id: `stage-${id || index}`,
+      id: `stage-${id}`,
       stageDocumentId: id,
       serviceStageId: String(stage.id),
-      name: readText(readField(value, "originalFileName", "fileName", "name")) || `Document ${index + 1}`,
+      name: readText(readField(value, "originalFileName", "fileName", "name")) || "—",
       type: (stageDocumentTypes[typeId] ?? readText(rawType)) || "Document",
       source: "Stage" as const,
       description: readText(readField(value, "description")) || undefined,
@@ -123,7 +130,26 @@ const unwrapRecords = (value: unknown): AssessorItem[] => {
     }
     if (!isRecord(current)) break;
     const list = Object.entries(current).find(([key, entry]) =>
-      ["data", "payload", "response", "result", "resultData", "items", "services", "records", "rows"]
+      [
+        "data",
+        "payload",
+        "response",
+        "result",
+        "resultData",
+        "items",
+        "services",
+        "activeServices",
+        "activeServiceList",
+        "activeServiceRecords",
+        "serviceList",
+        "serviceRecords",
+        "shipments",
+        "servicesUnderOversight",
+        "oversightServices",
+        "underOversight",
+        "records",
+        "rows",
+      ]
         .includes(key.toLowerCase()) &&
       (Array.isArray(entry) || isRecord(entry)),
     );
@@ -169,7 +195,7 @@ const unwrapCollection = (value: unknown, collectionNames: string[]): AssessorIt
 
 const display = (record: AssessorItem, ...keys: string[]): string => {
   const value = readField(record, ...keys);
-  return value === null || value === undefined || value === "" ? "Not recorded" : readText(value) || "Not recorded";
+  return value === null || value === undefined || value === "" ? "—" : readText(value) || "—";
 };
 
 const nested = (record: AssessorItem, ...keys: string[]): AssessorItem => {
@@ -207,6 +233,7 @@ const statusStyles = (status: string): string => {
 };
 
 const formatStatus = (value: unknown): string => {
+  if (isRecord(value)) return formatStatus(readField(value, "value", "id", "code", "name", "label", "status"));
   const labels: Record<number, string> = {
     1: "Draft",
     2: "Submitted",
@@ -221,10 +248,11 @@ const formatStatus = (value: unknown): string => {
   const numeric = Number(value);
   return Number.isInteger(numeric) && labels[numeric]
     ? labels[numeric]
-    : readText(value) || "Not recorded";
+    : readText(value) || "—";
 };
 
 const formatChannel = (value: unknown): string => {
+  if (isRecord(value)) return formatChannel(readField(value, "value", "id", "code", "name", "label", "riskChannel"));
   const labels: Record<number, string> = {
     1: "Blue channel",
     2: "Green channel",
@@ -234,36 +262,109 @@ const formatChannel = (value: unknown): string => {
   const numeric = Number(value);
   return Number.isInteger(numeric) && labels[numeric]
     ? labels[numeric]
-    : readText(value) || "Not recorded";
+    : readText(value) || "—";
 };
 
 const formatMode = (value: unknown): string => {
+  if (isRecord(value)) return formatMode(readField(value, "value", "id", "code", "name", "label", "mode"));
   const labels: Record<number, string> = { 1: "Multimodal", 2: "Unimodal" };
   const numeric = Number(value);
   if (Number.isInteger(numeric) && labels[numeric]) return labels[numeric];
   const normalized = readText(value).replace(/[\s_-]/g, "").toLowerCase();
   if (normalized === "multimodal" || normalized === "multimodalsearail") return "Multimodal";
   if (normalized === "unimodal" || normalized === "unimodalroad") return "Unimodal";
-  return readText(value) || "Not recorded";
+  return readText(value) || "—";
 };
 
-const formatStageName = (stage: AssessorServiceStage): string => {
-  const names: Record<number, string> = {
-    1: "Prepayment Invoice",
-    2: "Transit Permission",
-    3: "Amendment",
-    4: "Drop Risk",
-    5: "Delivery Order",
-    6: "Warehouse Status",
-    7: "Inspection",
-    8: "Assessment & Tax Payment",
-    9: "Emergency / Spot",
-    10: "Exit & Storage Payment",
-    11: "Transportation",
-    12: "Local Permission",
-    13: "Arrival",
-    14: "Clearance",
-  };
+const MULTIMODAL_STAGE_NAMES = [
+  "Prepayment Invoice",
+  "Transit Permission",
+  "Amendment",
+  "Drop Risk",
+  "Delivery Order",
+  "Warehouse Status",
+  "Inspection",
+  "Assessment & Tax Payment",
+  "Emergency / Spot",
+  "Exit & Storage Payment",
+  "Transportation",
+  "Clearance",
+];
+const UNIMODAL_STAGE_NAMES = ["Local Permission", "Arrival", "Clearance Request"];
+
+const makeWorkflowTemplate = (
+  mode: string,
+  service: AssessorItem | null,
+): AssessorServiceStage[] => {
+  const names = mode === "Unimodal" ? UNIMODAL_STAGE_NAMES : MULTIMODAL_STAGE_NAMES;
+  const currentStageValue = service
+    ? readField(service, "currentStage", "currentStageName", "activeStage", "activeStageName")
+    : undefined;
+  const currentStageRecord = isRecord(currentStageValue) ? currentStageValue : {};
+  const currentStageName = readText(
+    isRecord(currentStageValue)
+      ? readField(currentStageValue, "name", "stageName", "title")
+      : currentStageValue,
+  ).replace(/[\s_-]/g, "").toLowerCase();
+  const currentStageOrder = Number(
+    readField(service ?? {}, "currentStageOrder", "currentStageNumber", "activeStageOrder") ??
+      readField(currentStageRecord, "order", "stageOrder", "sequence", "stepNumber") ??
+      currentStageValue,
+  );
+  const currentIndex = currentStageName
+    ? names.findIndex((name) => name.replace(/[\s&/_-]/g, "").toLowerCase() === currentStageName)
+    : Number.isInteger(currentStageOrder) && currentStageOrder > 0
+      ? currentStageOrder - 1
+      : -1;
+  const serviceStatus = formatStatus(readField(service ?? {}, "status", "serviceStatus"));
+  const serviceStatusDescribesStage = [
+    "In progress",
+    "Needs review",
+    "Requires customer action",
+    "Blocked",
+    "Pending",
+  ].includes(serviceStatus);
+  const currentStatus = readField(currentStageRecord, "status", "stageStatus") ??
+    readField(service ?? {}, "currentStageStatus", "activeStageStatus") ??
+    (currentIndex >= 0 && serviceStatusDescribesStage ? serviceStatus : undefined);
+
+  return names.map((name, index) => ({
+    id: -(index + 1),
+    name,
+    status: index === currentIndex && readText(currentStatus)
+      ? readText(currentStatus)
+      : "Not started",
+    details: {
+      isWorkflowTemplate: true,
+      isCurrentStage: index === currentIndex,
+      hasRecordedStatus: index === currentIndex && Boolean(readText(currentStatus)),
+    },
+  }));
+};
+
+const getEmbeddedStages = (service: AssessorItem | null): AssessorServiceStage[] => {
+  if (!service) return [];
+  return unwrapCollection(
+    readField(service, "stages", "serviceStages", "shipmentStages"),
+    ["stages", "serviceStages", "shipmentStages", "items", "records", "rows"],
+  ).flatMap((record) => {
+    const rawId = readField(record, "id", "serviceStageId", "shipmentStageId", "stageId");
+    const id = typeof rawId === "number" ? rawId : Number(rawId);
+    if (!Number.isSafeInteger(id) || id <= 0) return [];
+    const name = readText(readField(record, "stageName", "name", "title", "stage"));
+    if (!name) return [];
+    const rawStatus = readField(record, "status", "stageStatus", "currentStatus");
+    return [{
+      id,
+      name,
+      status: rawStatus === null || rawStatus === undefined ? null : readText(rawStatus),
+      details: record,
+    }];
+  });
+};
+
+const formatStageName = (stage: AssessorServiceStage, mode = "Multimodal"): string => {
+  if (stage.details?.isWorkflowTemplate === true) return stage.name;
   const enumNames: Record<string, string> = {
     prepaymentinvoice: "Prepayment Invoice",
     transitpermission: "Transit Permission",
@@ -279,12 +380,21 @@ const formatStageName = (stage: AssessorServiceStage): string => {
     localpermission: "Local Permission",
     arrival: "Arrival",
     clearance: "Clearance",
+    clearancerequest: "Clearance Request",
   };
   const numeric = Number(stage.name);
+  const names = mode === "Unimodal" ? UNIMODAL_STAGE_NAMES : MULTIMODAL_STAGE_NAMES;
   return Number.isInteger(numeric)
-    ? names[numeric] ?? stage.name
-    : enumNames[stage.name.replace(/[\s_-]/g, "").toLowerCase()] ?? stage.name;
+    ? (mode === "Unimodal" && numeric >= 12 && numeric <= 14
+      ? names[numeric - 12]
+      : names[numeric - 1]) ?? stage.name
+    : (mode === "Unimodal" && stage.name.replace(/[\s_-]/g, "").toLowerCase() === "clearance"
+      ? "Clearance Request"
+      : enumNames[stage.name.replace(/[\s_-]/g, "").toLowerCase()] ?? stage.name);
 };
+
+const normalizeStageKey = (value: string): string =>
+  value.replace(/[^a-z0-9]/gi, "").toLowerCase();
 
 const formatStageStatus = (stage: AssessorServiceStage): string => {
   const labels: Record<number, string> = {
@@ -299,7 +409,7 @@ const formatStageStatus = (stage: AssessorServiceStage): string => {
   if (readField(details, "isBlocked") === true) return "Blocked";
   if (readField(details, "requiresCustomerAction") === true) return "Customer action";
   const numeric = Number(stage.status);
-  if (Number.isInteger(numeric)) return labels[numeric] ?? stage.status ?? "Not recorded";
+  if (Number.isInteger(numeric)) return labels[numeric] ?? stage.status ?? "—";
   const normalized = readText(stage.status).replace(/[\s_-]/g, "").toLowerCase();
   const enumLabels: Record<string, string> = {
     notstarted: "Not started",
@@ -309,7 +419,7 @@ const formatStageStatus = (stage: AssessorServiceStage): string => {
     blocked: "Blocked",
     needsreview: "Needs review",
   };
-  return enumLabels[normalized] ?? stage.status ?? "Not recorded";
+  return enumLabels[normalized] ?? stage.status ?? "—";
 };
 
 const isActiveStage = (stage: AssessorServiceStage): boolean => {
@@ -323,7 +433,6 @@ const isActiveStage = (stage: AssessorServiceStage): boolean => {
     "blocked",
     "attention",
     "active",
-    "pending",
   ].some((label) => status.includes(label)) ||
     readField(details, "isBlocked") === true ||
     readField(details, "requiresCustomerAction") === true;
@@ -348,6 +457,46 @@ const formatDateTime = (value: unknown): string => {
       }).format(date);
 };
 
+const formatEta = (value: unknown): string => {
+  const text = readText(value);
+  if (!text) return "—";
+  const date = new Date(text);
+  return Number.isNaN(date.getTime())
+    ? text
+    : new Intl.DateTimeFormat("en-CA", { timeZone: "UTC" }).format(date);
+};
+
+const getServiceCode = (service: AssessorItem, databaseId: number | null): string => {
+  const suppliedCode = readText(readField(
+    service,
+    "code",
+    "serviceCode",
+    "service_code",
+    "serviceNumber",
+    "trackingCode",
+    "trackingNumber",
+  ));
+  if (/^SVC-\d{4}-\d+$/i.test(suppliedCode)) return suppliedCode.toUpperCase();
+  const recordId = databaseId ?? Number(readField(service, "id", "serviceId", "shipmentId"));
+  if (Number.isSafeInteger(recordId) && recordId > 0) {
+    const createdAt = readText(readField(service, "createdAt", "createAt", "registeredAt"));
+    const year = createdAt && !Number.isNaN(new Date(createdAt).getTime())
+      ? new Date(createdAt).getUTCFullYear()
+      : new Date().getUTCFullYear();
+    return `SVC-${year}-${String(recordId).padStart(4, "0")}`;
+  }
+  return "—";
+};
+
+const channelDirective = (channel: string): string => {
+  const normalized = channel.toLowerCase();
+  if (normalized.includes("green")) return "Routine handling. Post-clearance audit may apply.";
+  if (normalized.includes("yellow")) return "Documentary review required before release. Assessor sign-off is mandatory.";
+  if (normalized.includes("blue")) return "Documentary verification is required before release.";
+  if (normalized.includes("red")) return "Inspection and compliance review are required before release.";
+  return "—";
+};
+
 const formatElapsed = (startValue: unknown, endValue: unknown): string => {
   const start = new Date(readText(startValue)).getTime();
   const end = new Date(readText(endValue)).getTime();
@@ -358,6 +507,20 @@ const formatElapsed = (startValue: unknown, endValue: unknown): string => {
   const remainingHours = hours % 24;
   return remainingHours ? `${days}d ${remainingHours}h` : `${days}d`;
 };
+
+const formatRelativeAge = (value: unknown): string => {
+  const timestamp = new Date(readText(value)).getTime();
+  if (!Number.isFinite(timestamp)) return "";
+  const elapsed = Math.max(0, Date.now() - timestamp);
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) return `${Math.max(1, minutes)}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+};
+
+const joinPresent = (...values: string[]): string =>
+  values.filter((value) => value && value !== "—").join(" · ");
 
 const getStageRequirements = (
   stage: AssessorServiceStage | null,
@@ -397,12 +560,24 @@ const channelStyles = (channel: string): string => {
   return "border-slate-200 bg-slate-50 text-slate-700";
 };
 
+const RiskChannelIcon = ({ channel, className }: { channel: string; className: string }) => {
+  const normalized = channel.toLowerCase();
+  const Icon = normalized.includes("green") || normalized.includes("blue")
+    ? ShieldCheck
+    : normalized.includes("red")
+      ? ShieldX
+      : ShieldAlert;
+  return <Icon className={className} />;
+};
+
 function ServiceDiscussion({
   serviceId,
   stage,
+  mode,
 }: {
   serviceId: number;
   stage: AssessorServiceStage;
+  mode: string;
 }) {
   const [comment, setComment] = useState("");
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -440,7 +615,7 @@ function ServiceDiscussion({
       <div>
         <h3 className="text-sm font-bold text-slate-900">Stage discussion</h3>
         <p className="mt-1 text-xs text-slate-500">
-          Comments for {formatStageName(stage)} on this service.
+          Comments for {formatStageName(stage, mode)} on this service.
         </p>
       </div>
       {error && <p role="alert" className="rounded border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{error}</p>}
@@ -505,7 +680,6 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
   const [serviceId, setServiceId] = useState<number | null>(null);
   const [service, setService] = useState<AssessorItem | null>(null);
   const [consignment, setConsignment] = useState<AssessorItem | null>(null);
-  const [consignmentLoading, setConsignmentLoading] = useState(false);
   const [activities, setActivities] = useState<AssessorItem[]>([]);
   const [tab, setTab] = useState<DetailTab>("stage");
   const [selectedStageId, setSelectedStageId] = useState<number | null>(null);
@@ -513,6 +687,10 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
   const [stageDecisionPending, setStageDecisionPending] = useState<ServiceStageDecisionAction | null>(null);
   const [stageDecisionFeedback, setStageDecisionFeedback] = useState<string | null>(null);
   const [stageDecisionFeedbackError, setStageDecisionFeedbackError] = useState(false);
+  const [uploadingStageDocument, setUploadingStageDocument] = useState(false);
+  const [stageUploadFeedback, setStageUploadFeedback] = useState<string | null>(null);
+  const [stageUploadFeedbackError, setStageUploadFeedbackError] = useState(false);
+  const stageFileInput = useRef<HTMLInputElement>(null);
   const [pageLoading, setPageLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
   const [stagesLoading, setStagesLoading] = useState(false);
@@ -527,21 +705,58 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
   );
   const documentsLoading = useServiceReviewStore((state) => state.documentsLoading);
   const documentsError = useServiceReviewStore((state) => state.documentsError);
-  const stages = useMemo(
+  const apiStages = useMemo(
     () => serviceId ? stagesByServiceId[String(serviceId)] ?? [] : [],
     [serviceId, stagesByServiceId],
   );
-  const selectedStage = stages.find((stage) => stage.id === selectedStageId) ?? stages[0] ?? null;
+  const workflowMode = service
+    ? formatMode(readField(service, "mode", "transportMode", "serviceType"))
+    : "Multimodal";
+  const stages = useMemo(() => {
+    const workflowTemplate = makeWorkflowTemplate(workflowMode, service);
+    const availableStages = apiStages.length ? apiStages : getEmbeddedStages(service);
+    if (!availableStages.length) return workflowTemplate;
+
+    const orderedStages = [...availableStages].sort((left, right) => {
+      const leftOrder = Number(readField(left.details ?? {}, "order", "stageOrder", "sequence", "stepNumber"));
+      const rightOrder = Number(readField(right.details ?? {}, "order", "stageOrder", "sequence", "stepNumber"));
+      return Number.isFinite(leftOrder) && Number.isFinite(rightOrder)
+        ? leftOrder - rightOrder
+        : 0;
+    });
+    const stageByName = new Map<string, AssessorServiceStage>();
+    orderedStages.forEach((stage, index) => {
+      const key = normalizeStageKey(formatStageName(stage, workflowMode));
+      const indexKey = normalizeStageKey(workflowTemplate[index]?.name ?? "");
+      stageByName.set(key, stage);
+      if (!stageByName.has(indexKey)) stageByName.set(indexKey, stage);
+      const explicitOrder = Number(readField(stage.details ?? {}, "order", "stageOrder", "sequence", "stepNumber"));
+      if (Number.isInteger(explicitOrder) && explicitOrder > 0) {
+        const orderedName = workflowTemplate[explicitOrder - 1]?.name;
+        if (orderedName) stageByName.set(normalizeStageKey(orderedName), stage);
+      }
+    });
+    return workflowTemplate.map((fallbackStage) =>
+      stageByName.get(normalizeStageKey(fallbackStage.name)) ?? fallbackStage,
+    );
+  }, [apiStages, service, workflowMode]);
+  const selectedStage = stages.find((stage) => stage.id === selectedStageId) ??
+    stages.find((stage) => stage.details?.isCurrentStage === true) ??
+    stages[0] ??
+    null;
   const customer = service ? nested(service, "customer", "customerProfile") : {};
-  const importerUser = service ? nested(service, "importer", "importerUser") : {};
-  const importer = Object.keys(customer).length ? customer : importerUser;
-  const importerBusinessName = display(importer, "businessName", "name", "companyName");
+  const importerUser = service ? nested(service, "importer", "importerUser", "importerProfile", "importerDetails") : {};
+  const importer = { ...(service ?? {}), ...customer, ...importerUser };
+  const importerBusinessName = display(importer, "businessName", "name", "companyName", "importerName", "importer_name");
   const importerName = [
     readText(readField(importer, "firstName")),
     readText(readField(importer, "lastName")),
   ].filter(Boolean).join(" ");
-  const executor = service ? nested(service, "assignedCaseExecutor", "caseExecutor") : {};
-  const assessor = service ? nested(service, "assignedAssessor", "assessor") : {};
+  const assignedStaff = service ? nested(service, "assignedStaff", "assigned_staff") : {};
+  const serviceExecutor = service ? nested(service, "assignedCaseExecutor", "caseExecutor", "executor") : {};
+  const serviceAssessor = service ? nested(service, "assignedAssessor", "assessor") : {};
+  const executor = Object.keys(serviceExecutor).length ? serviceExecutor : nested(assignedStaff, "executor");
+  const assessor = Object.keys(serviceAssessor).length ? serviceAssessor : nested(assignedStaff, "assessor");
   const consignor = useMemo(
     () => consignment ?? (service ? nested(service, "consignment", "consignmentDetails") : {}),
     [consignment, service],
@@ -551,8 +766,8 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
     [consignor],
   );
   const assignedPeople = [
-    { role: "Case executor", person: executor },
-    { role: "Assessor", person: assessor },
+    { role: display(executor, "role", "jobTitle") === "—" ? "Case executor" : display(executor, "role", "jobTitle"), person: executor },
+    { role: display(assessor, "role", "jobTitle") === "—" ? "Assessor" : display(assessor, "role", "jobTitle"), person: assessor },
   ];
 
   const loadService = useCallback(async () => {
@@ -567,7 +782,15 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
         const activeResponse = await AssessorEndpoints.getActiveServicesForRegister();
         const records = unwrapRecords(activeResponse);
         match = records.find((record) =>
-          readText(readField(record, "trackingNumber", "serviceNumber", "referenceNumber")).toLowerCase() === rawPathId.toLowerCase(),
+          readText(readField(
+            record,
+            "trackingNumber",
+            "serviceNumber",
+            "serviceCode",
+            "code",
+            "referenceNumber",
+            "reference_number",
+          )).toLowerCase() === rawPathId.toLowerCase(),
         ) ?? null;
         numericId = Number(match ? readField(match, "id", "serviceId", "shipmentId") : NaN);
       }
@@ -586,42 +809,32 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
       );
       setServiceId(numericId);
       setService(detail);
-      setConsignment(unwrapObject(readField(detail, "consignment", "consignmentDetails")) ?? detail);
+      setConsignment({
+        ...detail,
+        ...(unwrapObject(readField(detail, "consignment", "consignmentDetails")) ?? {}),
+      });
       setActivities(activityRecords);
       setSelectedStageId(null);
       setPageLoading(false);
       setStagesLoading(true);
-      setConsignmentLoading(true);
       const result = await Promise.allSettled([
         fetchStages(numericId),
         fetchDocuments(numericId),
-        AssessorEndpoints.getConsignmentDetails(numericId),
       ]);
       setStagesLoading(false);
-      setConsignmentLoading(false);
-      const failedStages = result[0].status === "rejected" ? result[0].reason : null;
       if (result[0].status === "fulfilled") {
-        const activeStage = result[0].value.find(isActiveStage) ??
-          result[0].value.find((stage) => formatStageStatus(stage).toLowerCase().includes("progress")) ??
-          result[0].value[0];
+        const stageRecords = result[0].value.length ? result[0].value : getEmbeddedStages(detail);
+        const activeStage = stageRecords.find((stage) => formatStageStatus(stage).toLowerCase().includes("needs review")) ??
+          stageRecords.find((stage) => formatStageStatus(stage).toLowerCase().includes("progress")) ??
+          stageRecords.find(isActiveStage) ??
+          stageRecords[0];
         setSelectedStageId(activeStage?.id ?? null);
-      }
-      if (failedStages) {
-        warnings.push(
-          failedStages instanceof Error
-            ? `The service loaded, but its workflow stages could not be loaded: ${failedStages.message}`
-            : "The service loaded, but its workflow stages could not be loaded.",
-        );
-      }
-      if (result[2].status === "fulfilled") {
-        const consignmentRecord = unwrapObject(result[2].value);
-        if (consignmentRecord) setConsignment(consignmentRecord);
-        else warnings.push("The service loaded, but its consignment response did not contain a record.");
       } else {
+        const stageError = result[0].reason;
         warnings.push(
-            result[2].reason instanceof Error
-              ? `The service loaded, but its logistics details could not be loaded: ${result[2].reason.message}`
-              : "The service loaded, but its logistics details could not be loaded.",
+          stageError instanceof Error
+            ? `Showing the standard ${formatMode(readField(detail, "mode", "transportMode", "serviceType"))} workflow because stage data could not be loaded: ${stageError.message}`
+            : "Showing the standard workflow because stage data could not be loaded.",
         );
       }
       setPageError(warnings.length ? warnings.join(" ") : null);
@@ -643,9 +856,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
     formatStageStatus(stage).toLowerCase().includes("complete"),
   ).length;
   const completion = stages.length ? Math.round((completedStages / stages.length) * 100) : 0;
-  const trackingNumber = service
-    ? display(service, "trackingNumber", "serviceNumber", "referenceNumber")
-    : "Not recorded";
+  const trackingNumber = service ? getServiceCode(service, serviceId) : "—";
   const serviceStatus = service
     ? formatStatus(readField(service, "status", "serviceStatus"))
     : "";
@@ -656,28 +867,60 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
   const canDecideStage = Boolean(
     serviceId &&
     selectedStage &&
+    selectedStage.id > 0 &&
+    selectedStage.details?.isWorkflowTemplate !== true &&
     !closedService &&
+    selectedStageStatus !== "—" &&
     selectedStageStatus !== "not started" &&
     selectedStageStatus !== "completed",
   );
   const currentStageStatus = selectedStage ? formatStageStatus(selectedStage) : "";
-  const headerStatus = currentStageStatus && currentStageStatus !== "Not recorded"
+  const stageStatusIsRecorded = selectedStage?.details?.isWorkflowTemplate !== true ||
+    selectedStage.details.hasRecordedStatus === true;
+  const headerStatus = stageStatusIsRecorded && currentStageStatus && currentStageStatus !== "—"
     ? currentStageStatus
     : serviceStatus;
   const secondaryReference = service
-    ? display(service, "clientReference", "referenceNo", "secondaryReference", "serviceReference", "externalReference")
-    : "Not recorded";
+    ? display(service, "referenceNumber", "reference_number", "clientReference", "referenceNo", "secondaryReference", "serviceReference", "externalReference")
+    : "—";
   const channel = service
-    ? formatChannel(readField(service, "riskLevel", "riskChannel", "channel"))
-    : "Not recorded";
-  const mode = service
-    ? formatMode(readField(service, "mode", "transportMode", "serviceType"))
-    : "Not recorded";
+    ? formatChannel(readField(service, "risk_channel", "riskLevel", "riskChannel", "channel"))
+    : "—";
+  const mode = workflowMode;
   const serviceTitle = service
-    ? display(service, "description", "title", "goodsDescription")
-    : "";
-  const origin = service ? display(service, "origin", "originName") : "";
-  const destination = service ? display(service, "destination", "destinationName") : "";
+    ? display(service, "cargo_description", "cargoDescription", "description", "title", "goodsDescription")
+    : "—";
+  const origin = display(consignor, "origin", "originName", "loadingPort") !== "—"
+    ? display(consignor, "origin", "originName", "loadingPort")
+    : service ? display(service, "origin", "originName", "loadingPort") : "—";
+  const destination = display(consignor, "destination", "destinationName", "deliveryLocation") !== "—"
+    ? display(consignor, "destination", "destinationName", "deliveryLocation")
+    : service ? display(service, "destination", "destinationName", "deliveryLocation") : "—";
+  const transitPort = display(consignor, "transitPort", "transit_port", "transitLocation") !== "—"
+    ? display(consignor, "transitPort", "transit_port", "transitLocation")
+    : service ? display(service, "transitPort", "transit_port", "transitLocation") : "—";
+  const routeSummary = service
+    ? display(service, "route_summary", "routeSummary", "route")
+    : "—";
+  const routeLabel = routeSummary !== "—"
+    ? routeSummary
+    : joinPresent(origin, transitPort, destination).replace(/ · /g, " → ");
+  const eta = formatEta(readField(service ?? {}, "eta", "estimatedArrival", "estimated_arrival", "expectedArrival", "arrivalDate"));
+  const explicitTransportReference = display(consignor, "transportReference", "vesselAndVoyage", "vessel_voyage");
+  const flightNumber = display(consignor, "flightNumber", "flight_number");
+  const carrierName = display(consignor, "carrierName", "carrier", "airline");
+  const vesselName = display(consignor, "vesselName", "vessel_name");
+  const voyage = display(consignor, "voyage", "voyageNumber", "voyage_number");
+  const logisticsTransport = explicitTransportReference !== "—"
+    ? explicitTransportReference
+    : vesselName !== "—"
+      ? `${vesselName}${voyage !== "—" ? ` / Voy. ${voyage}` : ""}`
+      : flightNumber !== "—" && carrierName !== "—"
+        ? `${flightNumber} — ${carrierName}`
+        : joinPresent(flightNumber, carrierName);
+  const importerDisplayName = importerBusinessName !== "—"
+    ? importerBusinessName
+    : importerName || display(service ?? {}, "importerName", "importer_name") || "—";
   const documents: EvidenceFile[] = serviceDocuments ?? [];
   const linkedStageDocuments = selectedStage
     ? documents.filter((file) => file.serviceStageId === String(selectedStage.id))
@@ -690,6 +933,64 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
     selectedStageDocuments,
     [...documents, ...stageEvidenceFiles],
   );
+  const uploadStageDocument = async (file: File) => {
+    const allowedExtensions = new Set(["pdf", "jpg", "jpeg", "png", "xlsx"]);
+    const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!allowedExtensions.has(extension)) {
+      setStageUploadFeedback("Choose a PDF, JPG, PNG, or XLSX file.");
+      setStageUploadFeedbackError(true);
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      setStageUploadFeedback("The file must be 25 MB or smaller.");
+      setStageUploadFeedbackError(true);
+      return;
+    }
+    if (!serviceId || !selectedStage || selectedStage.id <= 0 ||
+      selectedStage.details?.isWorkflowTemplate === true) {
+      setStageUploadFeedback("A recorded workflow stage is required to upload a document.");
+      setStageUploadFeedbackError(true);
+      return;
+    }
+
+    const payload = new FormData();
+    payload.append("File", file, file.name);
+    payload.append("ServiceId", String(serviceId));
+    payload.append("ServiceStageId", String(selectedStage.id));
+    payload.append("DocumentType", "10");
+    payload.append("Description", `Uploaded for ${formatStageName(selectedStage, mode)}`);
+    setUploadingStageDocument(true);
+    setStageUploadFeedback(null);
+    setStageUploadFeedbackError(false);
+    try {
+      await AssessorEndpoints.uploadServiceDocument(payload);
+      const refreshResults = await Promise.allSettled([
+        fetchDocuments(serviceId),
+        fetchStages(serviceId),
+      ]);
+      if (refreshResults.some((result) => result.status === "rejected")) {
+        setStageUploadFeedback(`${file.name} uploaded, but the latest stage data could not be refreshed.`);
+        setStageUploadFeedbackError(true);
+      } else {
+        setStageUploadFeedback(`${file.name} uploaded successfully.`);
+      }
+      if (stageFileInput.current) stageFileInput.current.value = "";
+    } catch (error: unknown) {
+      setStageUploadFeedback(error instanceof Error ? error.message : "Unable to upload the stage document.");
+      setStageUploadFeedbackError(true);
+    } finally {
+      setUploadingStageDocument(false);
+    }
+  };
+  const handleStageFileSelection = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    if (file) void uploadStageDocument(file);
+  };
+  const handleStageFileDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) void uploadStageDocument(file);
+  };
   const submitStageDecision = async (action: ServiceStageDecisionAction) => {
     if (!serviceId || !selectedStage) {
       setStageDecisionFeedback("Select a valid service stage before recording a decision.");
@@ -751,11 +1052,13 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
         "createdAt",
         "createdDate",
         "startedAt",
+        "activityDate",
+        "eventDate",
       );
       if (!readText(timestamp)) return [];
       const activityDescription = readText(readField(details, "activity", "event", "description")) ||
         [
-          `${formatStageName(stage)}: ${formatStageStatus(stage)}`,
+          `${formatStageName(stage, workflowMode)}: ${formatStageStatus(stage)}`,
           readText(readField(details, "notes", "comments", "blockReason")),
         ].filter(Boolean).join(" — ");
       const updatedBy = formatPersonName(readField(details, "updatedByUser", "completedBy", "updatedBy"));
@@ -772,7 +1075,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
       if (!Number.isFinite(rightTime)) return -1;
       return rightTime - leftTime;
     });
-  }, [activities, stages]);
+  }, [activities, stages, workflowMode]);
   const stageDiscussions = selectedStage && serviceId
     ? stageDiscussionsByKey[`${serviceId}:${selectedStage.id}`] ?? []
     : [];
@@ -802,7 +1105,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
       const value = label === "Transport mode"
         ? formatMode(readField(consignor, ...keys))
         : display(consignor, ...keys);
-      return [label, label === "Transport mode" && value === "Not recorded" ? mode : value] as const;
+      return [label, label === "Transport mode" && value === "—" ? mode : value] as const;
     });
   }, [consignor, mode]);
 
@@ -848,28 +1151,37 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="font-mono text-xl font-bold text-slate-900">{trackingNumber}</h1>
-              <span className="text-slate-300">·</span>
-              <span className="font-mono text-xs text-slate-500">
-                {secondaryReference !== "Not recorded" ? secondaryReference : `Service #${serviceId}`}
-              </span>
-              <span className={`rounded border px-2.5 py-1 text-xs font-medium ${statusStyles(headerStatus)}`}>{headerStatus}</span>
-              {serviceStatus && serviceStatus !== "Not recorded" && serviceStatus !== headerStatus && (
+              {secondaryReference !== "—" && (
+                <>
+                  <span className="text-slate-300">·</span>
+                  <span className="font-mono text-xs text-slate-500">{secondaryReference}</span>
+                </>
+              )}
+              {headerStatus && headerStatus !== "—" && (
+                <span className={`rounded border px-2.5 py-1 text-xs font-medium ${statusStyles(headerStatus)}`}>{headerStatus}</span>
+              )}
+              {serviceStatus && serviceStatus !== "—" && serviceStatus !== headerStatus && (
                 <span className={`rounded border px-2.5 py-1 text-xs font-medium ${statusStyles(serviceStatus)}`}>
                   Service {serviceStatus}
                 </span>
               )}
-              <span className={`inline-flex items-center gap-1 rounded border px-2.5 py-1 text-xs font-medium ${channelStyles(channel)}`}>
-                <ShieldAlert className="h-3.5 w-3.5" /> {channel}
-              </span>
-              <span className="rounded border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700">
-                {mode}
-              </span>
+              {channel !== "—" && (
+                <span className={`inline-flex items-center gap-1 rounded border px-2.5 py-1 text-xs font-medium ${channelStyles(channel)}`}>
+                  <RiskChannelIcon channel={channel} className="h-3.5 w-3.5" /> {channel}
+                </span>
+              )}
+              {mode !== "—" && (
+                <span className="rounded border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700">
+                  {mode}
+                </span>
+              )}
             </div>
-            <h2 className="mt-3 text-lg font-semibold text-slate-900">{serviceTitle}</h2>
-            <p className="mt-1 text-sm text-slate-500">
-              {display(importer, "businessName", "name", "companyName")} · {origin} → {destination}
-              {" · "}ETA {display(service, "eta", "estimatedArrival", "expectedArrival")}
-            </p>
+            {serviceTitle !== "—" && <h2 className="mt-3 text-lg font-semibold text-slate-900">{serviceTitle}</h2>}
+            {joinPresent(importerDisplayName, routeLabel, eta !== "—" ? `ETA ${eta}` : "") && (
+              <p className="mt-1 text-sm text-slate-500">
+                {joinPresent(importerDisplayName, routeLabel, eta !== "—" ? `ETA ${eta}` : "")}
+              </p>
+            )}
           </div>
           <button
             type="button"
@@ -881,41 +1193,35 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
             }}
             className="inline-flex shrink-0 items-center gap-2 rounded bg-sky-800 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-900"
           >
-            <CheckCircle2 className="h-4 w-4" /> Record assessment
+            <ClipboardCheck className="h-4 w-4" /> Record assessment
           </button>
         </div>
         <div className="mt-5">
           <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
-            <span>{stages.length ? `Stage ${stageIndex + 1} of ${stages.length}` : "Workflow stages unavailable"}</span>
+            <span>Stage {Math.max(stageIndex + 1, 1)} of {stages.length}</span>
             <span>{completion}% complete</span>
           </div>
-          {stages.length ? (
-            <div
-              role="progressbar"
-              aria-label="Workflow completion"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={completion}
-              className="flex h-2 gap-1"
-            >
-              {stages.map((stage) => {
-                const status = formatStageStatus(stage).toLowerCase();
-                const needsReview = status.includes("needs review") || status.includes("needsreview");
-                const segmentColor = status.includes("complete")
-                  ? "bg-emerald-500"
-                  : needsReview
-                    ? "bg-amber-500"
-                  : stage.id === selectedStage?.id
-                    ? "bg-violet-600"
-                    : status.includes("progress") || status.includes("review")
-                      ? "bg-blue-500"
-                      : "bg-slate-100";
-                return <span key={stage.id} className={`h-full min-w-0 flex-1 rounded-full ${segmentColor}`} />;
-              })}
-            </div>
-          ) : (
-            <div className="h-2 rounded-full bg-slate-100" />
-          )}
+          <div
+            role="progressbar"
+            aria-label="Workflow completion"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={completion}
+            className="flex h-2 gap-1"
+          >
+            {stages.map((stage) => {
+              const status = formatStageStatus(stage).toLowerCase();
+              const needsReview = status.includes("needs review") || status.includes("needsreview");
+              const segmentColor = status.includes("complete")
+                ? "bg-emerald-600"
+                : needsReview
+                  ? "bg-amber-500"
+                  : status.includes("progress") || status.includes("review")
+                    ? "bg-blue-500"
+                    : "bg-slate-200";
+              return <span key={stage.id} className={`h-full min-w-0 flex-1 rounded-full ${segmentColor}`} />;
+            })}
+          </div>
         </div>
       </header>
 
@@ -926,8 +1232,6 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
           </p>
           {stagesLoading ? (
             <p role="status" className="text-sm text-slate-500">Loading stages…</p>
-          ) : stages.length === 0 ? (
-            <p className="rounded border border-dashed border-slate-200 p-3 text-xs text-slate-500">No workflow stages were returned for this service.</p>
           ) : (
             <ol className="space-y-2">
               {stages.map((stage, index) => {
@@ -936,6 +1240,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                 const complete = stageStatus.toLowerCase().includes("complete");
                 const customerAction = stageStatus.toLowerCase().includes("customer action");
                 const needsReview = stageStatus.toLowerCase().includes("needs review");
+                const active = isActiveStage(stage);
                 return (
                   <li key={stage.id}>
                     <button
@@ -960,10 +1265,17 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                           ? customerAction ? "bg-violet-100 text-violet-700" : "bg-blue-100 text-blue-700"
                           : "bg-slate-100 text-slate-500"
                       }`}>
-                        {complete ? <Check className="h-4 w-4" /> : <span className="text-xs font-semibold">{String(index + 1).padStart(2, "0")}</span>}
+                        {complete
+                          ? <Check className="h-4 w-4" />
+                          : active
+                            ? <Search className="h-4 w-4" />
+                            : <CircleDashed className="h-4 w-4" />}
                       </span>
                       <span className="min-w-0">
-                        <span className="block truncate text-xs font-semibold text-slate-800">{formatStageName(stage)}</span>
+                        <span className="flex items-center gap-1 truncate text-xs font-semibold text-slate-800">
+                          <span className="font-mono text-slate-400">{String(index + 1).padStart(2, "0")}</span>
+                          {formatStageName(stage, mode)}
+                        </span>
                         <span className="mt-0.5 block text-[11px] text-slate-500">{stageStatus}</span>
                       </span>
                     </button>
@@ -978,8 +1290,8 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
           <div className="border-b border-slate-200 p-5">
             <p className="text-xs font-medium text-slate-500">Stage workspace</p>
             <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-lg font-bold text-slate-900">{selectedStage ? formatStageName(selectedStage) : "Workflow stage"}</h2>
-              {selectedStage && (
+              <h2 className="text-lg font-bold text-slate-900">{selectedStage ? formatStageName(selectedStage, mode) : "Workflow stage"}</h2>
+              {selectedStage && formatStageStatus(selectedStage) !== "—" && (
                 <span className={`rounded border px-2.5 py-1 text-xs font-medium ${statusStyles(formatStageStatus(selectedStage))}`}>
                   {formatStageStatus(selectedStage)}
                 </span>
@@ -1018,7 +1330,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <p className="text-[11px] font-semibold uppercase tracking-wide opacity-75">Current workflow stage</p>
-                          <h3 className="mt-1 text-sm font-bold">{formatStageName(selectedStage)}</h3>
+                          <h3 className="mt-1 text-sm font-bold">{formatStageName(selectedStage, mode)}</h3>
                         </div>
                         <span className="rounded border border-current/20 bg-white/60 px-2 py-1 text-[11px] font-semibold">
                           {formatStageStatus(selectedStage)}
@@ -1046,12 +1358,12 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                     <section className="rounded-lg border border-slate-200 p-4">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Previous stage</p>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Previous stage summary</p>
                           <h3 className="mt-1 text-sm font-bold text-slate-900">
-                            {previousStage ? formatStageName(previousStage) : "No previous stage"}
+                              {previousStage ? formatStageName(previousStage, mode) : "No previous stage"}
                           </h3>
                         </div>
-                        {previousStage && (
+                        {previousStage && formatStageStatus(previousStage) !== "—" && (
                           <span className={`rounded border px-2 py-1 text-[11px] font-medium ${statusStyles(formatStageStatus(previousStage))}`}>
                             {formatStageStatus(previousStage)}
                           </span>
@@ -1066,15 +1378,18 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                             "description",
                             "assessorNotes",
                           )) && (
-                            <p className="mt-3 text-xs leading-5 text-slate-600">
-                              {readText(readField(
-                                previousStage.details ?? {},
-                                "summary",
-                                "notes",
-                                "description",
-                                "assessorNotes",
-                              ))}
-                            </p>
+                            <>
+                              <p className="mt-3 text-[11px] font-medium text-slate-500">Carried forward context</p>
+                              <p className="mt-1 text-xs leading-5 text-slate-600">
+                                {readText(readField(
+                                  previousStage.details ?? {},
+                                  "summary",
+                                  "notes",
+                                  "description",
+                                  "assessorNotes",
+                                ))}
+                              </p>
+                            </>
                           )}
                           {formatDateTime(readField(
                             previousStage.details ?? {},
@@ -1124,9 +1439,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                             "updatedBy",
                             "updatedByUser",
                           )) && !formatPersonName(readField(previousStage.details ?? {}, "updatedByUser")) && (
-                            <p className="mt-3 text-xs text-slate-500">
-                              The workflow API returned the previous stage, but no summary or completion details.
-                            </p>
+                            <p className="mt-3 text-xs text-slate-500">No carried-forward context was provided.</p>
                           )}
                         </>
                       ) : (
@@ -1137,7 +1450,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                     <section className="rounded-lg border border-slate-200 p-4">
                       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                         <div>
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Required documents</p>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Required documents for this stage</p>
                           <h3 className="mt-1 text-sm font-bold text-slate-900">
                             {requiredDocuments.filter((item) => item.file).length} of {requiredDocuments.length} received
                           </h3>
@@ -1164,10 +1477,52 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                           ))}
                         </ul>
                       ) : (
-                        <p className="text-xs text-slate-500">
-                          No required-document list or stage-linked documents were returned for this stage.
-                        </p>
+                        <p className="text-xs text-slate-500">No mandatory documents defined for this stage.</p>
                       )}
+                      <input
+                        ref={stageFileInput}
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png,.xlsx"
+                        onChange={handleStageFileSelection}
+                        className="sr-only"
+                        aria-label="Attach a stage document"
+                        disabled={
+                          uploadingStageDocument ||
+                          !selectedStage ||
+                          selectedStage.id <= 0 ||
+                          selectedStage.details?.isWorkflowTemplate === true
+                        }
+                      />
+                      <div
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={handleStageFileDrop}
+                        className="mt-4 rounded-lg border border-dashed border-slate-300 bg-slate-50/60 p-4 text-center"
+                      >
+                        <FileUp className="mx-auto h-5 w-5 text-slate-500" />
+                        <p className="mt-2 text-xs font-medium text-slate-700">Attach stage documents</p>
+                        <p className="mt-1 text-[11px] text-slate-500">PDF, JPG, PNG, or XLSX · up to 25 MB</p>
+                        <button
+                          type="button"
+                          onClick={() => stageFileInput.current?.click()}
+                          disabled={
+                            uploadingStageDocument ||
+                            !selectedStage ||
+                            selectedStage.id <= 0 ||
+                            selectedStage.details?.isWorkflowTemplate === true
+                          }
+                          className="mt-2 text-xs font-semibold text-blue-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {uploadingStageDocument ? "Uploading…" : "Choose file"}
+                        </button>
+                        {stageUploadFeedback && (
+                          <p
+                            role={stageUploadFeedbackError ? "alert" : "status"}
+                            className={`mt-2 text-xs ${stageUploadFeedbackError ? "text-rose-700" : "text-emerald-700"}`}
+                          >
+                            {stageUploadFeedback}
+                          </p>
+                        )}
+                      </div>
                     </section>
 
                     <section className="space-y-3 rounded-lg border border-slate-200 p-4">
@@ -1246,7 +1601,25 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                 ) : (
                   <p className="text-sm text-slate-500">Select a stage to see its workspace.</p>
                 )}
-                {serviceId && <div id="assessment-decision"><AssessmentDecision key={serviceId} shipmentId={serviceId} serviceStatus={serviceStatus} showDiscussion={false} /></div>}
+                {serviceId && (
+                  <div id="assessment-decision">
+                    <AssessmentDecision
+                      key={`${serviceId}-${selectedStage?.id ?? "none"}`}
+                      shipmentId={serviceId}
+                      stageId={selectedStage && selectedStage.id > 0 && selectedStage.details?.isWorkflowTemplate !== true
+                        ? selectedStage.id
+                        : undefined}
+                      assessmentEnabled={Boolean(
+                        selectedStage &&
+                        selectedStage.id > 0 &&
+                        selectedStage.details?.isWorkflowTemplate !== true &&
+                        !["—", "not started", "completed", "blocked"].includes(selectedStageStatus),
+                      )}
+                      showDiscussion={false}
+                      serviceStatus={serviceStatus}
+                    />
+                  </div>
+                )}
               </>
             )}
             {tab === "documents" && (
@@ -1265,9 +1638,9 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
               </>
             )}
             {tab === "discussion" && (
-              selectedStage && serviceId
-                ? <ServiceDiscussion serviceId={serviceId} stage={selectedStage} />
-                : <p className="text-sm text-slate-500">Select a stage to view its discussion.</p>
+              selectedStage && serviceId && selectedStage.id > 0 && selectedStage.details?.isWorkflowTemplate !== true
+                ? <ServiceDiscussion serviceId={serviceId} stage={selectedStage} mode={mode} />
+                : <p className="text-sm text-slate-500">Stage discussion is available after workflow data is returned for a selected stage.</p>
             )}
             {tab === "consignment" && (
               <section>
@@ -1287,9 +1660,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                     </dl>
                     <section>
                       <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Transport records</h4>
-                      {consignmentLoading ? (
-                        <p role="status" className="mt-2 text-sm text-slate-500">Loading transport records…</p>
-                      ) : transports.length ? (
+                      {transports.length ? (
                         <ul className="mt-3 grid gap-3 sm:grid-cols-2">
                           {transports.map((transport, index) => {
                             const transportStage = stages.find(
@@ -1314,12 +1685,12 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                                   </div>
                                   <div>
                                     <dt className="text-slate-500">Product amount</dt>
-                                    <dd className="mt-0.5 font-medium text-slate-700">{formatProductAmount(readField(transport, "productAmount")) || "Not recorded"}</dd>
+                                    <dd className="mt-0.5 font-medium text-slate-700">{formatProductAmount(readField(transport, "productAmount")) || "—"}</dd>
                                   </div>
                                   <div>
                                     <dt className="text-slate-500">Workflow stage</dt>
                                     <dd className="mt-0.5 font-medium text-slate-700">
-                                      {transportStage ? formatStageName(transportStage) : "Not recorded"}
+                                      {transportStage ? formatStageName(transportStage, mode) : "—"}
                                     </dd>
                                   </div>
                                 </dl>
@@ -1333,8 +1704,8 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                     </section>
                   </div>
                 ) : (
-                  <p role={consignmentLoading ? "status" : undefined} className="text-sm text-slate-500">
-                    {consignmentLoading ? "Loading consignment details…" : "Consignment details were not returned by the API."}
+                  <p className="text-sm text-slate-500">
+                    Consignment details were not returned with the service record.
                   </p>
                 )}
               </section>
@@ -1346,16 +1717,35 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Importer</p>
             <p className="mt-2 text-sm font-bold text-slate-900">
-              {importerBusinessName !== "Not recorded" ? importerBusinessName : importerName || "Not recorded"}
+              {importerBusinessName !== "—" ? importerBusinessName : importerName || "—"}
             </p>
-            <p className="mt-1 text-xs text-slate-500">
-              {display(importer, "customerCode", "code", "id")} · TIN {display(importer, "tinNumber", "tin")}
-            </p>
+            {joinPresent(
+              display(importer, "customerCode", "customer_code", "importerCode", "code"),
+              display(importer, "tinNumber", "tin_number", "tin") !== "—"
+                ? `TIN ${display(importer, "tinNumber", "tin_number", "tin")}`
+                : "",
+            ) && (
+              <p className="mt-1 text-xs text-slate-500">
+                {joinPresent(
+                  display(importer, "customerCode", "customer_code", "importerCode", "code"),
+                  display(importer, "tinNumber", "tin_number", "tin") !== "—"
+                    ? `TIN ${display(importer, "tinNumber", "tin_number", "tin")}`
+                    : "",
+                )}
+              </p>
+            )}
             <p className="mt-2 text-xs text-slate-600">
-            {display(importer, "contactPerson", "primaryContact", "firstName")} · {display(importer, "contactPhone", "phone", "contactNumber")}
+              {joinPresent(
+                display(importer, "contactPerson", "contact_person", "primaryContact", "firstName"),
+                display(importer, "contactPhone", "contact_phone", "phone", "contactNumber"),
+              )}
             </p>
-            <p className="mt-1 break-all text-xs text-slate-500">{display(importer, "contactEmail", "email")}</p>
-            <p className="mt-1 text-xs text-slate-500">{display(importer, "businessAddress", "address")}</p>
+            {display(importer, "contactEmail", "contact_email", "email") !== "—" && (
+              <p className="mt-1 break-all text-xs text-slate-500">{display(importer, "contactEmail", "contact_email", "email")}</p>
+            )}
+            {display(importer, "businessAddress", "address") !== "—" && (
+              <p className="mt-1 text-xs text-slate-500">{display(importer, "businessAddress", "address")}</p>
+            )}
             <Link href={`/${lang}/admin/assessor/messages`} className="mt-3 inline-flex text-xs font-semibold text-blue-700 hover:underline">
               Message importer
             </Link>
@@ -1366,13 +1756,12 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
             {assignedPeople.map(({ role, person }) => (
               <div key={role} className="mt-3 flex items-center gap-3">
                 <span className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-600">
-                  {readText(readField(person, "firstName"))[0] ?? "—"}
-                  {readText(readField(person, "lastName"))[0] ?? ""}
+                  {formatPersonName(person).split(/\s+/).filter(Boolean).map((part) => part[0]).join("").slice(0, 2) || "—"}
                 </span>
                 <span className="min-w-0">
                   <span className="block truncate text-xs font-semibold text-slate-800">
-                    {display(person, "fullName", "name", "username") === "Not recorded"
-                      ? `${display(person, "firstName")} ${display(person, "lastName")}`
+                    {display(person, "fullName", "name", "username") === "—"
+                      ? [display(person, "firstName"), display(person, "lastName")].filter((part) => part !== "—").join(" ") || "—"
                       : display(person, "fullName", "name", "username")}
                   </span>
                   <span className="text-[11px] text-slate-500">{role}</span>
@@ -1386,8 +1775,17 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
               <AlertTriangle className="h-4 w-4 text-slate-500" />
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Risk &amp; compliance</p>
             </div>
-            <span className={`mt-3 inline-flex rounded border px-2.5 py-1 text-xs font-medium ${channelStyles(channel)}`}>{channel}</span>
-            <p className="mt-2 text-xs text-slate-600">{display(service, "riskReason", "riskNotes", "complianceNotes")}</p>
+            {channel !== "—" && (
+              <span className={`mt-3 inline-flex items-center gap-1 rounded border px-2.5 py-1 text-xs font-medium ${channelStyles(channel)}`}>
+                <RiskChannelIcon channel={channel} className="h-3.5 w-3.5" />
+                {channel}
+              </span>
+            )}
+            <p className="mt-2 text-xs text-slate-600">
+              {display(service, "riskReason", "risk_reason", "riskNotes", "risk_notes", "complianceNotes", "compliance_notes") !== "—"
+                ? display(service, "riskReason", "risk_reason", "riskNotes", "risk_notes", "complianceNotes", "compliance_notes")
+                : channelDirective(channel)}
+            </p>
           </section>
 
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1401,13 +1799,13 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                   <li key={readText(readField(activity, "id", "activityId")) || index} className="border-l-2 border-slate-200 pl-3">
                     <p className="text-xs font-medium text-slate-700">{display(activity, "description", "title", "action", "message")}</p>
                     <p className="mt-1 text-[11px] text-slate-500">
-                      {formatDateTime(readField(activity, "createdAt", "createAt", "timestamp")) || "Date not recorded"}
+                      {formatRelativeAge(readField(activity, "createdAt", "createAt", "timestamp"))}
                     </p>
                   </li>
                 ))}
               </ol>
             ) : (
-              <p className="mt-3 text-xs text-slate-500">No recent activity was returned by the service detail API.</p>
+              <p className="mt-3 text-xs text-slate-500">No activity has been recorded for this service.</p>
             )}
           </section>
 
@@ -1416,10 +1814,25 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
               <FileText className="h-4 w-4 text-slate-500" />
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Logistics</p>
             </div>
-            <p className="mt-2 text-xs font-medium text-slate-800">
-              {display(consignor, "flightNumber", "vesselName", "transportReference", "carrier")}
-            </p>
-            <p className="mt-1 text-xs text-slate-500">{origin} → {destination}</p>
+            {logisticsTransport && logisticsTransport !== "—" && (
+              <p className="mt-2 text-xs font-medium text-slate-800">
+                {logisticsTransport}
+              </p>
+            )}
+            {routeLabel && <p className="mt-1 text-xs text-slate-500">{routeLabel}</p>}
+            {joinPresent(
+              display(consignor, "routeCategory", "route_category"),
+              mode,
+              eta !== "—" ? `ETA ${eta}` : "",
+            ) && (
+              <p className="mt-1 text-xs text-slate-500">
+                {joinPresent(
+                  display(consignor, "routeCategory", "route_category"),
+                  mode,
+                  eta !== "—" ? `ETA ${eta}` : "",
+                )}
+              </p>
+            )}
             {transports.length > 0 && (
               <ul className="mt-3 space-y-2 border-t border-slate-100 pt-3">
                 {transports.map((transport, index) => (
@@ -1428,7 +1841,10 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                       {display(transport, "fullName", "driverName", "name")} · {display(transport, "plateNumber", "vehiclePlate")}
                     </p>
                     <p className="mt-0.5 text-slate-500">
-                      {display(transport, "phoneNumber", "phone")} · {formatProductAmount(readField(transport, "productAmount")) || "Amount not recorded"}
+                      {joinPresent(
+                        display(transport, "phoneNumber", "phone"),
+                        formatProductAmount(readField(transport, "productAmount")),
+                      )}
                     </p>
                   </li>
                 ))}

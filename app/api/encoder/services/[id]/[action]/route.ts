@@ -46,6 +46,28 @@ export async function PUT(request: Request, { params }: RouteContext) {
 	);
 }
 
+export async function GET(request: Request, { params }: RouteContext) {
+	const { id: rawId, action } = await params;
+	const id = readServiceId(rawId);
+	if (!id) {
+		return NextResponse.json({ error: "A valid service ID is required." }, { status: 400 });
+	}
+	if (action !== "stages" && action !== "documents") {
+		return NextResponse.json({ error: "Unknown service resource." }, { status: 404 });
+	}
+
+	return proxyDataEncoderRequest(
+		new Request(request.url, {
+			method: "GET",
+			headers: { Accept: "application/json" },
+		}),
+		"GET",
+		action === "stages"
+			? `${API_ROUTES.shipment.getStages}?shipmentId=${encodeURIComponent(String(id))}`
+			: `${API_ROUTES.document.getServiceDocuments}?serviceId=${encodeURIComponent(String(id))}`,
+	);
+}
+
 export async function POST(request: Request, { params }: RouteContext) {
 	const { id: rawId, action } = await params;
 	const id = readServiceId(rawId);

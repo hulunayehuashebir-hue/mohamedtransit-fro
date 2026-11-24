@@ -16,11 +16,11 @@ import {
   Truck,
   UserRound,
   FileText,
+  ArrowRight,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useManagerStore } from "@/store/managerStore";
-import { useAuthStore } from "@/store/useAuthStore";
-import { AuthService } from "@/services/auth.service";
+import useAuthStore from "@/modules/auth/auth.store";
 
 export type ManagerRoleType = "manager" | "administrator" | "supervisor";
 
@@ -51,10 +51,12 @@ const accountItems = [
   { label: "Profile Settings", href: "/admin/manager/profile", icon: UserRound, badge: null },
 ];
 
-const roles: { value: ManagerRoleType; label: string }[] = [
-  { value: "manager", label: "Manager / Administrator" },
-  { value: "administrator", label: "Administrator" },
-  { value: "supervisor", label: "Supervisor" },
+const demonstrationRoles = [
+  { id: "customer", label: "Customer / Importer", href: (locale: string) => `/${locale}/customer/dashboard` },
+  { id: "manager", label: "Manager / Administrator", href: (locale: string) => `/${locale}/admin/manager/dashboard` },
+  { id: "case-executor", label: "Case Executor", href: (locale: string) => `/${locale}/admin/case-Executer` },
+  { id: "assessor", label: "Assessor", href: (locale: string) => `/${locale}/admin/assessor` },
+  { id: "data-encoder", label: "Data Encoder", href: (locale: string) => `/${locale}/admin/data-encoder/dashboard` },
 ];
 
 export default function ManagerSidebar() {
@@ -63,9 +65,11 @@ export default function ManagerSidebar() {
   const lang = (params.lang as string) || "en";
   const router = useRouter();
 
-  const { sidebarCollapsed, mobileSidebarOpen, closeMobileSidebar, selectedRole, setSelectedRole } = useManagerStore();
+  const { sidebarCollapsed, mobileSidebarOpen, closeMobileSidebar } = useManagerStore();
   const { logout } = useAuthStore();
   const [roleOpen, setRoleOpen] = useState(false);
+  const roleDropdownRef = useRef<HTMLDivElement>(null);
+  const roleTriggerRef = useRef<HTMLButtonElement>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     Overview: true,
     Operations: true,
@@ -81,6 +85,39 @@ export default function ManagerSidebar() {
     { title: "Communication", items: communicationItems },
     { title: "Account", items: accountItems },
   ];
+  const activeRole = pathname.includes("/customer")
+    ? "customer"
+    : pathname.includes("/admin/manager")
+      ? "manager"
+      : pathname.includes("/admin/case-Executer")
+        ? "case-executor"
+        : pathname.includes("/admin/assessor")
+          ? "assessor"
+          : "data-encoder";
+  const currentRole = demonstrationRoles.find((role) => role.id === activeRole) ?? demonstrationRoles[1];
+
+  useEffect(() => {
+    if (!roleOpen) return;
+
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (event.target instanceof Node && !roleDropdownRef.current?.contains(event.target)) {
+        setRoleOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setRoleOpen(false);
+        roleTriggerRef.current?.focus();
+      }
+    };
+
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [roleOpen]);
 
   const isActive = (href: string) => {
     const fullHref = `/${lang}${href}`;
@@ -94,8 +131,8 @@ export default function ManagerSidebar() {
   };
 
   const handleLogout = async () => {
-    await AuthService.logout();
-    logout();
+    setRoleOpen(false);
+    await logout();
     router.push(`/${lang}/auth/login`);
   };
 
@@ -196,46 +233,57 @@ export default function ManagerSidebar() {
         </nav>
 
         <div className="border-t border-slate-200 p-3 space-y-2">
-          <div className="relative">
+          <div ref={roleDropdownRef} className="relative">
             <button
+              ref={roleTriggerRef}
               type="button"
               onClick={() => setRoleOpen((open) => !open)}
               title={sidebarCollapsed ? "Prototype role" : undefined}
+              aria-expanded={roleOpen}
+              aria-haspopup="menu"
+              aria-controls="manager-role-menu"
               className={`flex w-full items-center rounded-xl border border-slate-200 bg-slate-50 p-2.5 transition hover:bg-slate-100 ${
                 sidebarCollapsed ? "justify-center" : "justify-between"
               }`}
             >
+              {sidebarCollapsed && <UserRound className="h-4 w-4 text-slate-500" aria-hidden="true" />}
               {!sidebarCollapsed && (
                 <div className="min-w-0 text-left">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Prototype role</p>
                   <p className="truncate text-sm font-bold text-slate-900">
-                    {roles.find((role) => role.value === selectedRole)?.label || "Manager"}
+                    {currentRole.label}
                   </p>
                 </div>
               )}
 
-              {!sidebarCollapsed && (
-                <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${roleOpen ? "rotate-180" : ""}`} />
-              )}
+              <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${roleOpen ? "rotate-180" : ""}`} />
             </button>
 
-            {roleOpen && !sidebarCollapsed && (
-              <div className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-50 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+            {roleOpen && (
+              <div
+                id="manager-role-menu"
+                role="menu"
+                aria-label="Switch workspace"
+                className={`absolute bottom-[calc(100%+8px)] z-50 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${
+                  sidebarCollapsed ? "left-0 w-64" : "left-0 right-0"
+                }`}
+              >
                 <div className="border-b border-slate-100 px-3 py-2">
-                  <p className="text-xs font-bold text-slate-800">Switch role</p>
+                  <p className="text-xs font-bold text-slate-800">Switch workspace</p>
                 </div>
 
                 <div className="space-y-0.5 py-1">
-                  {roles.map((role) => {
-                    const selected = selectedRole === role.value;
+                  {demonstrationRoles.map((role) => {
+                    const selected = activeRole === role.id;
 
                     return (
-                      <button
-                        key={role.value}
-                        type="button"
+                      <Link
+                        key={role.id}
+                        href={role.href(lang)}
+                        role="menuitem"
                         onClick={() => {
-                          setSelectedRole(role.value as ManagerRoleType);
                           setRoleOpen(false);
+                          closeMobileSidebar();
                         }}
                         className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
                           selected ? "bg-blue-50 text-blue-700 font-medium" : "text-slate-600 hover:bg-slate-50"
@@ -243,7 +291,7 @@ export default function ManagerSidebar() {
                       >
                         <span>{role.label}</span>
                         {selected && <span className="text-xs text-slate-400">current</span>}
-                      </button>
+                      </Link>
                     );
                   })}
                 </div>
@@ -251,11 +299,13 @@ export default function ManagerSidebar() {
                 <div className="mt-1 border-t border-slate-100 pt-1">
                   <button
                     type="button"
-                    onClick={handleLogout}
+                    onClick={() => void handleLogout()}
+                    role="menuitem"
                     className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-red-600 transition hover:bg-red-50"
                   >
                     <LogOut className="h-4 w-4" />
                     <span>Sign out</span>
+                    <ArrowRight className="ml-auto h-3.5 w-3.5" />
                   </button>
                 </div>
               </div>

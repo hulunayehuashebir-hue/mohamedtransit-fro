@@ -5,6 +5,8 @@
   "login": "Login",
   "forgot": "Forgot Password?",
   "signup": "New user? Sign up",
+  "signupPrompt": "New user?",
+  "signupLink": "Sign up",
   "loading": "Authenticating...",
   "footer": "Secure Customs & Transit Compliance System"
 }

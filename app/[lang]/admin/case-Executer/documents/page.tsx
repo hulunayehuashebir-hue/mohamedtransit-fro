@@ -599,6 +599,7 @@ export default function CaseExecutorDocumentsPage() {
           `Could not load documents for ${failedDocumentRequests.length} assigned service(s): ${getErrorMessage(firstFailure.reason)}`,
         );
       }
+
     } catch (requestError: unknown) {
       setStageOptions([]);
       setDocuments([]);

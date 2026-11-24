@@ -48,8 +48,6 @@ export const API_ROUTES = {
     getPendingServiceReviews: "/Assessor/GetPendingServiceReviews",
     getServiceDetails: (id: number | string) =>
       `/Assessor/GetServiceDetails/${encodeURIComponent(String(id))}`,
-    getConsignmentDetails: (serviceId: number | string) =>
-      `/Assessor/GetConsignmentDetails/${encodeURIComponent(String(serviceId))}`,
     getServiceStages: (serviceId: number | string) =>
       `/Assessor/GetServiceStages/${encodeURIComponent(String(serviceId))}`,
     downloadStageDocument: "/Assessor/DownloadStageDocument",
@@ -74,8 +72,15 @@ export const API_ROUTES = {
     getDashboard: "/Manager/GetDashboard",
     getReportsAnalytics: "/Manager/GetReportsAnalytics",
     assignExecutor: "/Manager/AssignExecutor",
-    getServiceById: "/Manager/GetServiceById",
-
+    getServiceById: (serviceId: string | number) =>
+      `/Manager/GetServiceById/${encodeURIComponent(String(serviceId))}`,
+    getStageDocuments: "/Manager/GetStageDocuments",
+    getStageDiscussions: "/Manager/GetStageDiscussions",
+    addStageDiscussion: "/Manager/AddStageDiscussion",
+    getServiceActivities: "/Manager/GetServiceActivities",
+    getConsignmentDetails: "/Manager/GetConsignmentDetails",
+    notifyImporter: "/Manager/NotifyImporter",
+    escalateService: "/Manager/EscalateService",
     getAllServices: "/Manager/GetAllServices",
     getAllStaff: "/Manager/GetAllStaff",
     getAllCustomers: "/Manager/GetAllCustomers",
@@ -124,8 +129,11 @@ export const API_ROUTES = {
     getProfile: "/Customer/GetProfile",
     updateProfile: "/Customer/UpdateProfile",
     getNotifications: "/Customer/GetNotifications",
+    markNotificationAsRead: "/Customer/MarkNotificationAsRead",
     createService: "/Customer/CreateService",
     getMyServices: "/Customer/GetMyServices",
+    updateInspectionType: "/Customer/UpdateInspectionType",
+    uploadStageDocument: "/Customer/UploadStageDocument",
   },
   notification: {
     getUserNotifications: "/Notification/GetUserNotifications",

@@ -13,6 +13,7 @@ import type {
   ServiceStageDecisionRequest,
   VerifyCustomerDocumentRequest,
 } from "./assessor.type";
+import type { ShipmentDocumentPayload } from "@/modules/shipment/shipment.types";
 
 export const AssessorEndpoints = {
   // 1. Pending Customer Approvals
@@ -24,13 +25,6 @@ export const AssessorEndpoints = {
     service.get(API_ROUTES.assessor.getPendingServiceReviews),
   getServiceDetails: (serviceId: number | string) =>
     service.get(API_ROUTES.assessor.getServiceDetails(serviceId)),
-  getConsignmentDetails: (serviceId: number | string) => {
-    const id = String(serviceId).trim();
-    if (!/^[1-9]\d*$/.test(id)) {
-      throw new Error("A valid service ID is required to load Assessor consignment details.");
-    }
-    return service.get(API_ROUTES.assessor.getConsignmentDetails(id));
-  },
   getServiceStages: (serviceId: number | string) => {
     const id = String(serviceId).trim();
     if (!/^[1-9]\d*$/.test(id)) {
@@ -38,6 +32,8 @@ export const AssessorEndpoints = {
     }
     return service.get(API_ROUTES.assessor.getServiceStages(id));
   },
+  uploadServiceDocument: (payload: ShipmentDocumentPayload) =>
+    service.post(API_ROUTES.shipment.uploadDocument, payload),
   downloadStageDocument: (
     serviceId: number | string,
     stageId: number | string,
@@ -94,6 +90,16 @@ export const AssessorEndpoints = {
     service.get(API_ROUTES.assessor.getAssessmentDocuments),
   recordAssessment: (payload: RecordAssessmentRequest) =>
     service.post(API_ROUTES.assessor.recordAssessment, payload),
+  updateAssessmentStage: (payload: RecordAssessmentRequest & { status: number }) =>
+    service.put(API_ROUTES.shipment.updateStageStatus(), {
+      shipmentId: payload.serviceId,
+      shipmentStageId: payload.stageId,
+      status: payload.status,
+      decision: payload.decision,
+      taxAmount: payload.taxAmount,
+      dutyAmount: payload.dutyAmount,
+      notes: payload.notes,
+    }),
 
   // GET /api/v1/Document/GetServiceDocuments?serviceId={id}
   getServiceDocuments: (serviceId: number | string) =>

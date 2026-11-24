@@ -1,20 +1,30 @@
 import { create } from "zustand";
 import { ManagerEndpoints } from "./manager.endpoint";
+import { MANAGER_WORKFLOW_STAGE_NAMES } from "./manager.type";
 import type { NotificationCategory, NotificationItem } from "@/features/notifications/notification.types";
 import type {
   ManagerAssignedUserSummary,
+  ManagerAssignedStaffMember,
+  ManagerAddStageDiscussionRequest,
+  ManagerConsignmentDetails,
   ManagerCustomer,
   ManagerCustomerDocumentSummary,
   ManagerCustomerPagination,
   ManagerCustomerQuery,
   ManagerDashboardSummary,
+  ManagerEscalateServiceRequest,
   ManagerExecutorAssignment,
   ManagerExecutorAssignmentRequest,
+  ManagerNotifyImporterRequest,
   ManagerReportsAnalytics,
+  ManagerServiceActivity,
+  ManagerStageDiscussion,
   ManagerServiceDocument,
   ManagerServiceDetail,
   ManagerServiceMessage,
   ManagerServiceStage,
+  ManagerImporterDetail,
+  ManagerWorkflowStageStatus,
   ManagerServicePagination,
   ManagerServiceQuery,
   ManagerStaff,
@@ -28,6 +38,15 @@ interface ManagerState {
   reportsError: string | null;
   serviceDetailLoading: boolean;
   serviceDetailError: string | null;
+  serviceDocumentsError: string | null;
+  serviceActivities: ManagerServiceActivity[];
+  serviceActivitiesError: string | null;
+  consignmentDetails: ManagerConsignmentDetails | null;
+  consignmentLoading: boolean;
+  consignmentError: string | null;
+  stageDiscussions: ManagerStageDiscussion[];
+  stageDiscussionsLoading: boolean;
+  stageDiscussionsError: string | null;
   notifications: NotificationItem[];
   notificationsLoading: boolean;
   notificationsError: string | null;
@@ -51,9 +70,19 @@ interface ManagerState {
   fetchStaff: () => Promise<ManagerStaff[]>;
   fetchCustomers: (params?: ManagerCustomerQuery) => Promise<ManagerCustomer[]>;
   fetchServiceById: (id: string | number) => Promise<ManagerServiceDetail | null>;
-  updateServiceStage: (payload: ShipmentServiceStageUpdatePayload) => Promise<boolean>;
+  updateServiceStage: (
+    payload: ShipmentServiceStageUpdatePayload,
+  ) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
   uploadServiceDocument: (payload: FormData) => Promise<void>;
-  assignExecutor: (payload: ManagerExecutorAssignmentRequest) => Promise<ManagerExecutorAssignment | null>;
+  assignExecutor: (payload: ManagerExecutorAssignmentRequest) => Promise<boolean>;
+  fetchStageDiscussions: (stageId: number, serviceId: number) => Promise<ManagerStageDiscussion[]>;
+  addStageDiscussion: (payload: ManagerAddStageDiscussionRequest) => Promise<void>;
+  notifyImporter: (payload: ManagerNotifyImporterRequest) => Promise<void>;
+  escalateService: (payload: ManagerEscalateServiceRequest) => Promise<void>;
+  fetchConsignmentDetails: (serviceId: number) => Promise<ManagerConsignmentDetails | null>;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -66,12 +95,92 @@ const readField = (record: Record<string, unknown>, ...names: string[]): unknown
   return key ? record[key] : undefined;
 };
 
-const readNumericId = (record: Record<string, unknown>, ...keys: string[]): number | string | undefined => {
+const normalizeForeignKey = (value: unknown): number | string | undefined => {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  }
+  if (typeof value !== "string") return undefined;
+
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (/^\d+$/.test(normalized)) {
+    const numericValue = Number(normalized);
+    return Number.isSafeInteger(numericValue) && numericValue > 0
+      ? numericValue
+      : undefined;
+  }
+  return normalized;
+};
+
+const isMissingUnassignedUserError = (error: unknown): boolean => {
+  const pending: unknown[] = [error];
+  const seen = new Set<unknown>();
+
+  while (pending.length) {
+    const value = pending.pop();
+    if (typeof value === "string") {
+      if (/user.*(?:id\s*)?['"]?0['"]?.*not found/i.test(value)) return true;
+      continue;
+    }
+    if (value instanceof Error) {
+      pending.push(value.message);
+      continue;
+    }
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    if (!isRecord(value) || seen.has(value)) continue;
+    seen.add(value);
+    pending.push(value.message, value.detail, value.title, value.errors, value.response, value.data);
+  }
+
+  return false;
+};
+
+const isMissingManagerServiceError = (error: unknown): boolean => {
+  const pending: unknown[] = [error];
+  const seen = new Set<unknown>();
+
+  while (pending.length) {
+    const value = pending.pop();
+    if (typeof value === "string") {
+      if (
+        /\b404\b.*not found/i.test(value) ||
+        /service.*not found|not found.*service/i.test(value)
+      ) {
+        return true;
+      }
+      continue;
+    }
+    if (value instanceof Error) {
+      pending.push(value.message);
+      continue;
+    }
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    if (!isRecord(value) || seen.has(value)) continue;
+    seen.add(value);
+    if (Number(value.status ?? value.statusCode) === 404) return true;
+    pending.push(value.message, value.detail, value.title, value.errors, value.response, value.data);
+  }
+
+  return false;
+};
+
+const readServiceId = (record: Record<string, unknown>, ...keys: string[]): number | string | undefined => {
   for (const key of keys) {
     const value = readField(record, key);
     if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
-    if (typeof value === "string" && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0) {
-      return value;
+    if (typeof value === "string") {
+      const normalized = value.trim();
+      if (!normalized) continue;
+      if (/^\d+$/.test(normalized) && (!Number.isSafeInteger(Number(normalized)) || Number(normalized) <= 0)) {
+        continue;
+      }
+      return normalized;
     }
   }
   return undefined;
@@ -80,7 +189,9 @@ const readNumericId = (record: Record<string, unknown>, ...keys: string[]): numb
 const normalizeAssignedUser = (value: unknown): ManagerAssignedUserSummary | null => {
   if (!isRecord(value)) return null;
 
-  const id = readField(value, "id", "userId", "staffId");
+  const rawId = readField(value, "id", "userId", "staffId");
+  const id = normalizeForeignKey(rawId);
+  if (rawId !== undefined && rawId !== null && id === undefined) return null;
   const readText = (...keys: string[]) => {
     const field = readField(value, ...keys);
     return typeof field === "string" ? field : null;
@@ -88,45 +199,132 @@ const normalizeAssignedUser = (value: unknown): ManagerAssignedUserSummary | nul
 
   return {
     id: typeof id === "number" || typeof id === "string" ? id : undefined,
+    name: readText("name", "displayName", "fullName"),
     username: readText("username", "userName"),
     email: readText("email"),
     firstName: readText("firstName", "givenName"),
     lastName: readText("lastName", "surname"),
-    businessName: readText("businessName", "companyName"),
+    businessName: readText("businessName", "companyName", "importerName"),
     profilePhoto: readText("profilePhoto", "profileImage"),
-    phone: readText("phone", "phoneNumber"),
+    phone: readText("phone", "phoneNumber", "contactPhone"),
+    role: readText("role", "roleName", "jobTitle"),
+    is_active: readField(value, "isActive", "is_active", "active") === true
+      || readField(value, "isActive", "is_active", "active") === 1
+      || readField(value, "isActive", "is_active", "active") === "true"
+      || readField(value, "isActive", "is_active", "active") === "1",
+    customer_code: readText("customerCode", "customer_code", "importerCode"),
+    tin: readText("tin", "tinNumber", "taxIdentificationNumber"),
+    contact_person: readText("contactPerson", "contact_person"),
+  };
+};
+
+const normalizeImporterDetail = (
+  value: unknown,
+  fallbackId?: number | string,
+): ManagerImporterDetail | null => {
+  const importer = normalizeAssignedUser(value);
+  const id = importer?.id ?? fallbackId;
+  if (!importer || id === undefined || id === null || String(id) === "0") return null;
+
+  return {
+    ...importer,
+    id,
+    name: importer.name || importer.businessName
+      || [importer.firstName, importer.lastName].filter(Boolean).join(" ")
+      || importer.username
+      || "—",
+    customer_code: importer.customer_code || null,
+    tin: importer.tin || null,
+    contact_person: importer.contact_person || null,
+    phone: importer.phone || null,
   };
 };
 
 const normalizeStaff = (value: unknown): ManagerStaff | null => {
   if (!isRecord(value)) return null;
 
-  const id = typeof value.id === "number" || typeof value.id === "string" ? value.id : undefined;
-  if (id === undefined) return null;
+  const id = ["userId", "staffId", "id"]
+    .map((field) => readField(value, field))
+    .find((candidate) => {
+      if (typeof candidate !== "number" && typeof candidate !== "string") return false;
+      const normalized = String(candidate).trim();
+      return /^[1-9]\d*$/.test(normalized) && Number.isSafeInteger(Number(normalized));
+    });
+  if (typeof id !== "number" && typeof id !== "string") return null;
+  const numericId = Number(id);
   const roleRecords = Array.isArray(value.roles)
     ? value.roles
     : Array.isArray(value.userRoles)
       ? value.userRoles
       : [];
+  const rawRoleIds = Array.isArray(value.roleIds)
+    ? value.roleIds
+    : Array.isArray(value.RoleIds)
+      ? value.RoleIds
+      : [];
+  const rawRoleNames = Array.isArray(value.roleNames)
+    ? value.roleNames
+    : Array.isArray(value.RoleNames)
+      ? value.RoleNames
+      : [];
+  const roleIdValues = rawRoleIds.flatMap((roleId) => {
+    const parsedId = typeof roleId === "number"
+      ? roleId
+      : typeof roleId === "string" && /^\d+$/.test(roleId.trim())
+        ? Number(roleId)
+        : NaN;
+    return Number.isSafeInteger(parsedId) && parsedId > 0 ? [parsedId] : [];
+  });
+  const roleNameValues = rawRoleNames.flatMap((roleName) =>
+    typeof roleName === "string" && roleName.trim() ? [roleName.trim()] : [],
+  );
+  const assignedRoles = roleRecords.flatMap((assignment) => {
+    if (!isRecord(assignment)) return [];
+    const nestedRole = isRecord(assignment.role) ? assignment.role : null;
+    const rawId = assignment.roleId
+      ?? nestedRole?.id
+      ?? (typeof (assignment.roleName ?? assignment.name) === "string" ? assignment.id : undefined);
+    const rawName = assignment.roleName ?? assignment.name ?? assignment.displayName
+      ?? nestedRole?.roleName ?? nestedRole?.name;
+    const roleId = typeof rawId === "number"
+      ? rawId
+      : typeof rawId === "string" && /^\d+$/.test(rawId)
+        ? Number(rawId)
+        : undefined;
+    if (
+      roleId === undefined ||
+      !Number.isSafeInteger(roleId) ||
+      roleId <= 0 ||
+      typeof rawName !== "string" ||
+      !rawName.trim()
+    ) {
+      return [];
+    }
+    return [{ id: roleId, roleName: rawName.trim() }];
+  });
+  const parallelAssignedRoles = roleIdValues.flatMap((roleId, index) => {
+    const roleName = roleNameValues[index];
+    return roleName ? [{ id: roleId, roleName }] : [];
+  });
   const roleIds = [
-    ...(Array.isArray(value.roleIds)
-      ? value.roleIds.filter((roleId): roleId is number => typeof roleId === "number" && Number.isInteger(roleId))
-      : []),
+    ...roleIdValues,
     ...roleRecords.flatMap((role) => {
-    if (!isRecord(role)) return [];
-    const nestedRole = isRecord(role.role) ? role.role : null;
-    const roleId = role.roleId ?? nestedRole?.id ?? (typeof role.roleName === "string" ? role.id : undefined);
-    return typeof roleId === "number" ? [roleId] : [];
+      if (!isRecord(role)) return [];
+      const nestedRole = isRecord(role.role) ? role.role : null;
+      const roleId = role.roleId ?? nestedRole?.id ?? (typeof role.roleName === "string" ? role.id : undefined);
+      return typeof roleId === "number" ? [roleId] : [];
     }),
   ];
   const roleNames = [
+    ...(typeof value.role === "string" && value.role.trim() ? [value.role.trim()] : []),
     ...(typeof value.roleName === "string" && value.roleName.trim() ? [value.roleName.trim()] : []),
+    ...roleNameValues,
     ...roleRecords.flatMap((role) => {
-    if (typeof role === "string") return [role];
-    if (!isRecord(role)) return [];
-    const nestedRole = isRecord(role.role) ? role.role : null;
-    const roleName = role.roleName ?? nestedRole?.roleName ?? nestedRole?.name;
-    return typeof roleName === "string" && roleName.trim() ? [roleName.trim()] : [];
+      if (typeof role === "string") return [role];
+      if (!isRecord(role)) return [];
+      const nestedRole = isRecord(role.role) ? role.role : null;
+      const roleName = role.roleName ?? nestedRole?.roleName ?? nestedRole?.name;
+      return typeof roleName === "string" && roleName.trim() ? [roleName.trim()] : [];
     }),
   ];
   const branch = value.branchName ?? value.branch ?? value.branchOffice ?? value.assignedBranch;
@@ -145,24 +343,70 @@ const normalizeStaff = (value: unknown): ManagerStaff | null => {
       : typeof value.isOnline === "boolean"
         ? value.isOnline ? "Online" : "Offline"
         : null;
+  const lockedValue = readField(value, "isAccountLocked", "isLocked", "locked");
+  const isAccountLocked = lockedValue === true || lockedValue === 1 || lockedValue === "true" || lockedValue === "1";
 
   return {
-    id,
+    id: numericId,
+    name: typeof value.name === "string" ? value.name : null,
     username: typeof value.username === "string" ? value.username : null,
     email: typeof value.email === "string" ? value.email : null,
     firstName: typeof value.firstName === "string" ? value.firstName : null,
     lastName: typeof value.lastName === "string" ? value.lastName : null,
     profilePhoto: typeof value.profilePhoto === "string" ? value.profilePhoto : null,
     phone: typeof value.phone === "string" ? value.phone : null,
-    isAccountLocked: value.isAccountLocked === true,
+    isActive: (() => {
+      const explicit = readField(value, "isActive", "active", "is_active");
+      if (explicit === true || explicit === 1 || explicit === "true") return true;
+      if (explicit === false || explicit === 0 || explicit === "false") return false;
+      const status = readField(value, "accountStatus", "status");
+      return typeof status === "string" && status.trim().toLowerCase() === "active";
+    })() && !isAccountLocked,
+    isAccountLocked,
     accountStatus: typeof value.accountStatus === "number" || typeof value.accountStatus === "string"
       ? value.accountStatus
       : null,
     roleIds: [...new Set(roleIds)],
     roleNames: [...new Set(roleNames)],
+    assignedRoles: [...new Map(
+      [...assignedRoles, ...parallelAssignedRoles].map((role) => [role.id, role]),
+    ).values()],
     branchName,
     openCases: openCasesValue !== undefined && Number.isFinite(parsedOpenCases) ? parsedOpenCases : null,
     availability,
+  };
+};
+
+const normalizeRiskChannel = (value: unknown): "blue" | "green" | "yellow" | "red" | null => {
+  if (isRecord(value)) {
+    return normalizeRiskChannel(readField(value, "name", "label", "riskChannel", "riskLevel", "value", "code", "id"));
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized.includes("blue")) return "blue";
+    if (normalized.includes("green")) return "green";
+    if (normalized.includes("yellow")) return "yellow";
+    if (normalized.includes("red")) return "red";
+    if (/^[1-4]$/.test(normalized)) {
+      return ({ "1": "blue", "2": "green", "3": "yellow", "4": "red" } as const)[normalized as "1" | "2" | "3" | "4"];
+    }
+  }
+  if (typeof value === "number") {
+    return ({ 1: "blue", 2: "green", 3: "yellow", 4: "red" } as const)[value as 1 | 2 | 3 | 4] ?? null;
+  }
+  return null;
+};
+
+const normalizeAssignedStaffMember = (
+  user: ManagerAssignedUserSummary | null,
+  defaultRole: string,
+): ManagerAssignedStaffMember | null => {
+  if (!user || user.id === undefined || user.id === null || String(user.id) === "0") return null;
+  return {
+    id: user.id,
+    name: user.name || user.businessName || [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username || user.email || "",
+    role: user.role || defaultRole,
+    is_active: user.is_active === true,
   };
 };
 
@@ -188,7 +432,7 @@ const normalizeManagerNotification = (value: unknown, index: number): Notificati
     ? priorityValue
     : urgent
       ? "HIGH"
-    : undefined;
+      : undefined;
   const categoryByType: Record<number, NotificationCategory> = {
     1: "Service Updates",
     2: "Documents",
@@ -227,8 +471,17 @@ const normalizeManagerNotification = (value: unknown, index: number): Notificati
 const normalizeAssignment = (value: unknown): ManagerExecutorAssignment | null => {
   if (!isRecord(value)) return null;
 
-  const trackingNumberValue = readField(value, "trackingNumber", "serviceNumber", "serviceReference");
-  const id = readNumericId(
+  const trackingNumberValue = readField(
+    value,
+    "trackingNumber",
+    "serviceNumber",
+    "serviceReference",
+    "serviceCode",
+    "code",
+    "referenceNumber",
+    "reference_number",
+  );
+  const id = readServiceId(
     value,
     "id",
     "shipmentId",
@@ -237,39 +490,76 @@ const normalizeAssignment = (value: unknown): ManagerExecutorAssignment | null =
     "shipmentDatabaseId",
     "serviceDatabaseId",
     "recordId",
+    "serviceCode",
   );
   const importerIdValue = readField(value, "importerId", "customerId");
   const trackingNumber = typeof trackingNumberValue === "string" ? trackingNumberValue : "";
-  const importerId = typeof importerIdValue === "number" || typeof importerIdValue === "string" ? importerIdValue : undefined;
+  const importerId = normalizeForeignKey(importerIdValue);
   const readText = (...keys: string[]) => {
     const field = readField(value, ...keys);
     return typeof field === "string" ? field : "";
   };
   const readId = (...keys: string[]) => {
-    const field = readField(value, ...keys);
-    return typeof field === "number" || typeof field === "string" ? field : null;
+    return normalizeForeignKey(readField(value, ...keys)) ?? null;
   };
   const readScalar = (...keys: string[]) => {
     const field = readField(value, ...keys);
     return typeof field === "number" || typeof field === "string" ? field : null;
   };
+  const readBoolean = (...keys: string[]): boolean | undefined => {
+    const field = readField(value, ...keys);
+    if (typeof field === "boolean") return field;
+    if (field === 1 || field === "1" || (typeof field === "string" && field.toLowerCase() === "true")) return true;
+    if (field === 0 || field === "0" || (typeof field === "string" && field.toLowerCase() === "false")) return false;
+    return undefined;
+  };
+  const importerRecord = readField(value, "importer", "customer", "importerProfile");
+  const assignedCaseExecutor = normalizeAssignedUser(readField(value, "assignedCaseExecutor", "caseExecutor", "executor"));
+  const assignedAssessor = normalizeAssignedUser(readField(value, "assignedAssessor", "assessor"));
+  const importer = normalizeAssignedUser(importerRecord);
+  const code = readText("code", "serviceCode");
+  const referenceNumber = readText("referenceNumber", "reference_number", "referenceNo");
 
   if (!trackingNumber || id === undefined) return null;
 
   return {
     id,
     trackingNumber,
+    code: code || (/^SVC-/i.test(trackingNumber) ? trackingNumber : null),
+    reference_number: referenceNumber || (trackingNumber.includes("/") ? trackingNumber : null),
+    cargo_description: readText("cargoDescription", "cargo_description", "description", "itemDescription", "title") || null,
+    route_summary: readText("routeSummary", "route_summary") || null,
+    estimated_arrival: readText("estimatedArrival", "estimated_arrival", "eta") || null,
+    risk_channel: normalizeRiskChannel(readField(value, "riskChannel", "risk_channel", "riskLevel")),
+    risk_channel_label: readText("riskChannelLabel", "risk_channel_label") || null,
+    risk_channel_description: readText("riskChannelDescription", "risk_channel_description") || null,
+    isBlocked: readBoolean("isBlocked", "blocked"),
+    requiresCustomerAction: readBoolean("requiresCustomerAction", "requires_customer_action", "customerActionRequired"),
     importerId,
-    importer: normalizeAssignedUser(readField(value, "importer", "customer", "importerProfile")),
+    importer: importer
+      ? {
+          ...importer,
+          id: importer.id ?? importerId,
+          name: importer.name || importer.businessName || [importer.firstName, importer.lastName].filter(Boolean).join(" ") || importer.username || "",
+          customer_code: importer.customer_code || null,
+          tin: importer.tin || null,
+          contact_person: importer.contact_person || null,
+          phone: importer.phone || null,
+        }
+      : null,
     description: readText("description", "itemDescription", "title"),
     importerName: readText("importerName", "businessName") || null,
     mode: readScalar("mode", "transportMode"),
     status: readScalar("status", "serviceStatus") ?? "",
     assignedHub: readId("assignedHub", "assignedHubId"),
-    assignedCaseExecutorId: readId("assignedCaseExecutorId", "caseExecutorId"),
-    assignedCaseExecutor: normalizeAssignedUser(readField(value, "assignedCaseExecutor", "caseExecutor", "executor")),
+    assignedCaseExecutorId: readId("assignedCaseExecutorId", "caseExecutorId", "assignedTo", "assigneeId"),
+    assignedCaseExecutor,
     assignedAssessorId: readId("assignedAssessorId", "assessorId"),
-    assignedAssessor: normalizeAssignedUser(readField(value, "assignedAssessor", "assessor")),
+    assignedAssessor,
+    assigned_staff: {
+      executor: normalizeAssignedStaffMember(assignedCaseExecutor, "Case Executor"),
+      assessor: normalizeAssignedStaffMember(assignedAssessor, "Assessor"),
+    },
     createdByUser: normalizeAssignedUser(readField(value, "createdByUser", "createdBy")),
     customerId: readId("customerId", "importerId"),
     assignmentNotes: readText("assignmentNotes", "notes") || null,
@@ -277,6 +567,13 @@ const normalizeAssignment = (value: unknown): ManagerExecutorAssignment | null =
     destination: readText("destination"),
     routeCategory: readText("routeCategory", "destination") || null,
     eta: readText("eta", "estimatedArrival") || null,
+    dueAt: readText("dueAt", "dueDate", "slaDueAt", "slaDeadline") || null,
+    lastUpdateDate: readText("lastUpdateDate", "updatedAt", "lastUpdatedAt") || null,
+    registeredDate: readText("registeredDate", "createAt", "createdAt") || null,
+    completedAt: readText("completedAt", "completionDate") || null,
+    deliveredAt: readText("deliveredAt", "deliveryDate") || null,
+    transitPort: readText("transitPort", "transit_port", "transitLocation") || null,
+    currentStageStartedAt: readText("currentStageStartedAt", "stageStartedAt", "stageEnteredAt") || null,
     declaredValue: readScalar("declaredValue"),
     taxCategory: readText("taxCategory") || null,
     countryOfOrigin: readText("countryOfOrigin") || null,
@@ -319,6 +616,65 @@ const normalizeServiceMessage = (value: unknown): ManagerServiceMessage | null =
   };
 };
 
+const normalizeStageDiscussion = (value: unknown, index: number): ManagerStageDiscussion | null => {
+  if (!isRecord(value)) return null;
+
+  const authorValue = readField(value, "user", "author", "createdBy", "sender");
+  const authorRecord = isRecord(authorValue) ? authorValue : null;
+  const author = authorRecord
+    ? [
+        readField(authorRecord, "firstName"),
+        readField(authorRecord, "lastName"),
+      ]
+        .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
+        .join(" ") || readField(authorRecord, "username", "name", "email")
+    : authorValue;
+  const createdAt = readField(value, "createdAt", "createAt", "createdDate", "timestamp");
+  const comment = readField(value, "comment", "message", "content", "text");
+  const id = readField(value, "id", "discussionId", "commentId");
+
+  return {
+    id: id === null || id === undefined ? `discussion-${index}` : String(id),
+    comment: typeof comment === "string" ? comment : "",
+    createdAt: typeof createdAt === "string" ? createdAt : null,
+    author: typeof author === "string" && author.trim() ? author : null,
+  };
+};
+
+const normalizeServiceActivity = (value: unknown, index: number): ManagerServiceActivity | null => {
+  if (!isRecord(value)) return null;
+  const rawId = readField(value, "id", "activityId", "serviceActivityId");
+  const rawLabel = readField(value, "description", "title", "message", "activity", "action", "name");
+  const rawDate = readField(value, "createdAt", "createAt", "occurredAt", "timestamp", "time");
+  const label = typeof rawLabel === "string" ? rawLabel : "";
+  if (!label.trim()) return null;
+  return {
+    id: rawId === null || rawId === undefined ? `activity-${index}` : String(rawId),
+    label,
+    date: typeof rawDate === "string" ? rawDate : null,
+  };
+};
+
+const normalizeConsignmentDetails = (value: unknown): ManagerConsignmentDetails | null => {
+  if (!isRecord(value)) return null;
+  const readText = (...keys: string[]) => {
+    const field = readField(value, ...keys);
+    return typeof field === "string" ? field : null;
+  };
+  const declaredValue = readField(value, "declaredValue", "cargoValue", "value");
+  return {
+    description: readText("description", "itemDescription", "goodsDescription"),
+    origin: readText("origin", "countryOfOrigin", "originCountry"),
+    destination: readText("destination", "destinationCountry"),
+    declaredValue: typeof declaredValue === "number" || typeof declaredValue === "string"
+      ? declaredValue
+      : null,
+    taxCategory: readText("taxCategory", "taxType"),
+    countryOfOrigin: readText("countryOfOrigin", "originCountry"),
+    registeredDate: readText("registeredDate", "createdAt", "createAt"),
+  };
+};
+
 const normalizeServiceCollection = (value: unknown, collectionNames: string[]): unknown[] => {
   let current = value;
   const collectionKeys = collectionNames.map((name) => name.toLowerCase());
@@ -350,38 +706,106 @@ const normalizeServiceCollection = (value: unknown, collectionNames: string[]): 
   return [];
 };
 
-const normalizeServiceStage = (value: unknown): ManagerServiceStage | null => {
+const normalizeWorkflowStageStatus = (value: unknown): ManagerWorkflowStageStatus | undefined => {
+  if (typeof value === "number" || (typeof value === "string" && /^\d+$/.test(value))) {
+    const numericStatus = Number(value);
+    if (numericStatus === 4) return "completed";
+    if (numericStatus === 3) return "in_progress";
+    if (numericStatus === 1 || numericStatus === 2) return "not_started";
+    if (numericStatus === 5 || numericStatus === 6) return "needs_review";
+    return undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase().replaceAll(/[\s_-]+/g, "");
+  if (normalized.includes("complete") || normalized.includes("deliver")) return "completed";
+  if (normalized.includes("progress") || normalized.includes("active")) return "in_progress";
+  if (normalized.includes("review") || normalized.includes("block")) return "needs_review";
+  if (normalized.includes("notstarted") || normalized.includes("pending") || normalized.includes("draft")) {
+    return "not_started";
+  }
+  return undefined;
+};
+
+const normalizeServiceStage = (value: unknown, index = 0): ManagerServiceStage | null => {
   if (!isRecord(value)) return null;
 
   const nullableText = (...keys: string[]): string | null => {
     const field = readField(value, ...keys);
     return typeof field === "string" || typeof field === "number" ? String(field) : null;
   };
-  const nullableId = (...keys: string[]): number | string | undefined => {
-    const field = readField(value, ...keys);
-    return typeof field === "number" || typeof field === "string" ? field : undefined;
+  const positiveId = (...keys: string[]): number | undefined => {
+    for (const key of keys) {
+      const field = readField(value, key);
+      const normalized = typeof field === "number"
+        ? String(field)
+        : typeof field === "string"
+          ? field.trim()
+          : "";
+      if (!normalized || !/^[1-9]\d*$/.test(normalized)) continue;
+      const id = Number(normalized);
+      if (Number.isSafeInteger(id)) return id;
+    }
+    return undefined;
   };
   const nullableStatus = (...keys: string[]): number | string | null => {
     const field = readField(value, ...keys);
     return typeof field === "number" || typeof field === "string" ? field : null;
   };
 
+  const rawOrder = readField(value, "order", "stageOrder", "sequence", "step");
+  const orderFromName = nullableText("stageName", "name", "title", "stage")?.match(/^(?:stage\s*)?(\d+)$/i)?.[1];
+  const parsedOrder = Number(rawOrder ?? orderFromName);
+  const order = Number.isSafeInteger(parsedOrder) && parsedOrder > 0 ? parsedOrder : index + 1;
+  const rawStatus = nullableStatus("status") ?? nullableStatus("stageStatus") ?? nullableStatus("currentStatus");
+  const rawName = nullableText("stageName", "name", "title", "stage");
+  const canonicalName = MANAGER_WORKFLOW_STAGE_NAMES[order - 1];
+  const name = !rawName || /^\s*(?:stage\s*)?\d+\s*$/i.test(rawName)
+    ? canonicalName ?? rawName ?? `Stage ${order}`
+    : rawName;
+  const stageExecutionId = positiveId(
+    "stageExecutionId",
+    "serviceStageExecutionId",
+    "executionId",
+    "shipmentStageId",
+    "id",
+  );
+  const serviceStageId = positiveId(
+    "serviceStageId",
+    "stageId",
+    "workflowStageId",
+    "stageDefinitionId",
+    "stageTemplateId",
+  );
+
   return {
     ...value,
-    id: nullableId("serviceStageExecutionId", "stageExecutionId", "executionId", "id", "shipmentStageId", "serviceStageId", "stageId"),
-    stageExecutionId: nullableId("stageExecutionId", "serviceStageExecutionId", "executionId"),
-    serviceStageExecutionId: nullableId("serviceStageExecutionId", "stageExecutionId", "executionId"),
-    executionId: nullableId("executionId", "stageExecutionId", "serviceStageExecutionId"),
-    stageName: nullableText("stageName", "name", "title", "stage"),
-    name: nullableText("name", "stageName", "title", "stage"),
-    status: nullableStatus("status"),
+    id: stageExecutionId,
+    order,
+    serviceStageId,
+    stageExecutionId,
+    serviceStageExecutionId: stageExecutionId,
+    executionId: stageExecutionId,
+    stageName: name,
+    name,
+    status: normalizeWorkflowStageStatus(rawStatus) ?? null,
+    apiStatus: rawStatus,
     stageStatus: nullableStatus("stageStatus"),
     currentStatus: nullableStatus("currentStatus"),
     createdAt: nullableText("createdAt", "createAt"),
     updatedAt: nullableText("updatedAt", "lastUpdatedAt"),
+    updated_at: nullableText("updatedAt", "lastUpdatedAt"),
     completedAt: nullableText("completedAt", "finishedAt"),
     notes: nullableText("notes", "stageNotes", "summary"),
     comments: nullableText("comments", "comment"),
+    documents: normalizeServiceCollection(value, [
+      "documents",
+      "stageDocuments",
+      "serviceDocuments",
+      "serviceStageDocuments",
+      "shipmentDocuments",
+    ])
+      .map(normalizeServiceDocument)
+      .filter((document): document is ManagerServiceDocument => document !== null),
   };
 };
 
@@ -401,11 +825,13 @@ const normalizeServiceDocument = (value: unknown): ManagerServiceDocument | null
     return field === true || field === 1 || field === "1" || field === "true";
   };
   const stageId = nullableId("stageId", "serviceStageId", "shipmentStageId");
+  const documentStatus = readField(value, "status", "documentStatus", "uploadStatus");
 
   return {
     id: nullableId("id", "documentId"),
     fileName: nullableText("fileName"),
     originalFileName: nullableText("originalFileName", "originalName"),
+    status: typeof documentStatus === "number" || typeof documentStatus === "string" ? documentStatus : null,
     fileExtension: nullableText("fileExtension"),
     mimeType: nullableText("mimeType", "contentType"),
     documentType: typeof readField(value, "documentType", "type") === "number" || typeof readField(value, "documentType", "type") === "string"
@@ -428,13 +854,24 @@ const normalizeServiceDetail = (value: unknown): ManagerServiceDetail | null => 
 
   const service = normalizeAssignment(value);
   if (!service) return null;
+  const importerDetail = normalizeImporterDetail(
+    readField(value, "importer", "customer", "importerProfile"),
+    service.importerId,
+  );
 
   return {
     ...service,
+    importer: importerDetail,
     stages: normalizeServiceCollection(value, ["stages", "serviceStages", "shipmentStages", "executions", "serviceStageExecutions"])
-      .map(normalizeServiceStage)
+      .map((stage, index) => normalizeServiceStage(stage, index))
       .filter((stage): stage is ManagerServiceStage => stage !== null),
-    documents: normalizeServiceCollection(value, ["documents", "serviceDocuments", "shipmentDocuments"])
+    documents: normalizeServiceCollection(value, [
+      "documents",
+      "stageDocuments",
+      "serviceDocuments",
+      "serviceStageDocuments",
+      "shipmentDocuments",
+    ])
       .map(normalizeServiceDocument)
       .filter((document): document is ManagerServiceDocument => document !== null),
     messages: normalizeServiceCollection(value, ["messages", "serviceMessages", "stageDiscussions"])
@@ -711,10 +1148,19 @@ const normalizeManagerReportsAnalytics = (value: unknown): ManagerReportsAnalyti
       if (typeof row.executorName !== "string") {
         throw new Error("The manager reports endpoint returned an invalid executor name.");
       }
+      const rawOnTimeRate = row.onTimeRate ?? row.onTimePercentage ?? row.onTimeClearanceRate;
+      const onTimeCount = row.onTimeCases ?? row.casesCompletedOnTime;
+      const casesClosed = readNumber(row.casesClosed, "closed cases");
+      const onTimeRate = rawOnTimeRate === null || rawOnTimeRate === undefined
+        ? onTimeCount === null || onTimeCount === undefined || casesClosed <= 0
+          ? null
+          : (readNumber(onTimeCount, "on-time cases") / casesClosed) * 100
+        : readNumber(rawOnTimeRate, "executor on-time rate");
       return {
         executorId: readNumber(row.executorId, "executor id"),
         executorName: row.executorName,
-        casesClosed: readNumber(row.casesClosed, "closed cases"),
+        casesClosed,
+        onTimeRate: onTimeRate === null ? null : onTimeRate <= 1 ? onTimeRate * 100 : onTimeRate,
         averageCycleDays: row.averageCycleDays === null || row.averageCycleDays === undefined
           ? null
           : readNumber(row.averageCycleDays, "average cycle duration"),
@@ -731,6 +1177,15 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   reportsError: null,
   serviceDetailLoading: false,
   serviceDetailError: null,
+  serviceDocumentsError: null,
+  serviceActivities: [],
+  serviceActivitiesError: null,
+  consignmentDetails: null,
+  consignmentLoading: false,
+  consignmentError: null,
+  stageDiscussions: [],
+  stageDiscussionsLoading: false,
+  stageDiscussionsError: null,
   notifications: [],
   notificationsLoading: false,
   notificationsError: null,
@@ -754,11 +1209,15 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
     try {
       const response = await ManagerEndpoints.getNotifications();
       const payload = unwrapApiData(response);
-      const notifications = Array.isArray(payload)
-        ? payload
-            .map(normalizeManagerNotification)
-            .filter((notification): notification is NotificationItem => notification !== null)
-        : [];
+      const notificationRows = normalizeServiceCollection(payload, ["notifications", "items", "records"]);
+      const rows = notificationRows.length
+        ? notificationRows
+        : isRecord(payload) && readField(payload, "id", "notificationId") !== undefined
+          ? [payload]
+          : [];
+      const notifications = rows
+        .map(normalizeManagerNotification)
+        .filter((notification): notification is NotificationItem => notification !== null);
       set({ notifications, notificationsLoading: false, notificationsError: null });
       return notifications;
     } catch (error: unknown) {
@@ -848,40 +1307,248 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   },
 
   fetchServiceById: async (id) => {
-    set({ selectedService: null, serviceDetailLoading: true, serviceDetailError: null });
+    set({
+      selectedService: null,
+      serviceDetailLoading: true,
+      serviceDetailError: null,
+      serviceDocumentsError: null,
+      serviceActivities: [],
+      serviceActivitiesError: null,
+      consignmentDetails: null,
+      consignmentLoading: false,
+      consignmentError: null,
+      stageDiscussions: [],
+      stageDiscussionsLoading: false,
+      stageDiscussionsError: null,
+    });
 
     try {
-      const response = await ManagerEndpoints.getServiceById(id);
-      const serviceDetails = normalizeServiceDetail(unwrapApiData(response));
+      const requestedId = String(id).trim();
+      let serviceId: number;
+      if (/^[1-9]\d*$/.test(requestedId) && Number.isSafeInteger(Number(requestedId))) {
+        serviceId = Number(requestedId);
+      } else {
+        const normalizedCode = requestedId.toLowerCase();
+        const findByCode = (services: ManagerExecutorAssignment[]) =>
+          services.find((candidate) =>
+            [candidate.code, candidate.reference_number, candidate.trackingNumber]
+              .some((serviceCode) => serviceCode?.trim().toLowerCase() === normalizedCode) &&
+            /^[1-9]\d*$/.test(String(candidate.id)) &&
+            Number.isSafeInteger(Number(candidate.id)),
+          );
+        let matchingService = findByCode(get().services);
+
+        if (!matchingService) {
+          let page = 1;
+          let totalPages = 1;
+          const pageSize = 20;
+          while (page <= totalPages) {
+            const response = await ManagerEndpoints.getAllServices({ page, pageSize });
+            const servicePage = normalizeServicePage(response);
+            matchingService = findByCode(servicePage.services);
+            totalPages = Math.max(totalPages, servicePage.pagination.totalPages);
+            if (matchingService) break;
+            page += 1;
+          }
+        }
+
+        const resolvedId = matchingService?.id;
+        if (resolvedId === undefined || !/^[1-9]\d*$/.test(String(resolvedId))) {
+          throw new Error(
+            `Service "${requestedId}" was not found with a numeric database ID in the Manager service list.`,
+          );
+        }
+        serviceId = Number(resolvedId);
+        if (!Number.isSafeInteger(serviceId)) {
+          throw new Error(`Service "${requestedId}" has an invalid numeric database ID.`);
+        }
+      }
+
+      let serviceDetails: ManagerServiceDetail | null = null;
+      try {
+        const response = await ManagerEndpoints.getServiceById(serviceId);
+        serviceDetails = normalizeServiceDetail(unwrapApiData(response));
+      } catch (error: unknown) {
+        if (!isMissingUnassignedUserError(error) && !isMissingManagerServiceError(error)) {
+          throw error;
+        }
+
+        let fallbackService = get().services.find(
+          (candidate) => Number(candidate.id) === serviceId,
+        );
+        try {
+          let page = 1;
+          let totalPages = 1;
+          while (!fallbackService && page <= totalPages) {
+            const fallbackResponse = await ManagerEndpoints.getAllServices({ page, pageSize: 20 });
+            const servicePage = normalizeServicePage(fallbackResponse);
+            fallbackService = servicePage.services.find(
+              (candidate) => Number(candidate.id) === serviceId,
+            );
+            totalPages = Math.max(totalPages, servicePage.pagination.totalPages);
+            page += 1;
+          }
+        } catch (fallbackError: unknown) {
+          console.warn(
+            `Unable to load the service-list fallback after Manager/GetServiceById returned an unassigned-user error for service ${serviceId}.`,
+            fallbackError,
+          );
+        }
+
+        if (fallbackService) {
+          console.warn(
+            `Manager/GetServiceById could not resolve service ${serviceId}; using the Manager service-list record.`,
+          );
+          serviceDetails = {
+            ...fallbackService,
+            importer: normalizeImporterDetail(fallbackService.importer, fallbackService.importerId),
+            stages: [],
+            documents: [],
+            messages: [],
+          };
+        } else {
+          if (!isMissingUnassignedUserError(error)) throw error;
+          set({
+            selectedService: null,
+            serviceDetailLoading: false,
+            serviceDetailError: null,
+          });
+          return null;
+        }
+      }
 
       if (!serviceDetails) {
         throw new Error("No service details returned from the API.");
       }
 
-      const serviceId = serviceDetails.id ?? id;
-      const [stagesResponse, documentsResponse] = await Promise.allSettled([
+      const [stagesResponse, activitiesResponse] = await Promise.allSettled([
         ManagerEndpoints.getServiceStages(serviceId),
-        ManagerEndpoints.getServiceDocuments(serviceId),
+        ManagerEndpoints.getServiceActivities(serviceId),
       ]);
       const apiStages = stagesResponse.status === "fulfilled"
-        ? normalizeServiceCollection(unwrapApiData(stagesResponse.value), ["stages", "serviceStages", "shipmentStages", "executions", "serviceStageExecutions"])
-            .map(normalizeServiceStage)
+        ? normalizeServiceCollection(
+            unwrapApiData(stagesResponse.value),
+            ["stages", "serviceStages", "shipmentStages", "executions", "serviceStageExecutions"],
+          )
+            .map((stage, index) => normalizeServiceStage(stage, index))
             .filter((stage): stage is ManagerServiceStage => stage !== null)
         : [];
-      const apiDocuments = documentsResponse.status === "fulfilled"
-        ? normalizeServiceCollection(unwrapApiData(documentsResponse.value), ["documents", "serviceDocuments", "shipmentDocuments"])
-            .map(normalizeServiceDocument)
-            .filter((document): document is ManagerServiceDocument => document !== null)
+      const apiActivities = activitiesResponse.status === "fulfilled"
+        ? normalizeServiceCollection(
+            unwrapApiData(activitiesResponse.value),
+            ["activities", "serviceActivities", "items", "records"],
+          )
+            .map(normalizeServiceActivity)
+            .filter((activity): activity is ManagerServiceActivity => activity !== null)
         : [];
+      const serviceActivitiesError = activitiesResponse.status === "rejected"
+        ? typeof activitiesResponse.reason === "string"
+          ? activitiesResponse.reason
+          : activitiesResponse.reason instanceof Error
+            ? activitiesResponse.reason.message
+            : "Failed to load service activities."
+        : null;
+
+      const stagesForDocuments = apiStages.length ? apiStages : serviceDetails.stages;
+      const documentResults: Array<{
+        stageId: number | string | null;
+        documents: ManagerServiceDocument[];
+        error: string | null;
+      }> = await Promise.all(
+        stagesForDocuments.map(async (stage) => {
+          const stageId = stage.stageExecutionId
+            ?? stage.serviceStageExecutionId
+            ?? stage.executionId
+            ?? stage.id;
+          if (stageId === undefined || !/^[1-9]\d*$/.test(String(stageId))) {
+            return { stageId: null, documents: [], error: null };
+          }
+
+          try {
+            const response = await ManagerEndpoints.getStageDocuments(serviceId, stageId);
+            const documents = normalizeServiceCollection(unwrapApiData(response), [
+              "documents",
+              "stageDocuments",
+              "serviceDocuments",
+              "serviceStageDocuments",
+              "shipmentDocuments",
+            ])
+              .flatMap((document): ManagerServiceDocument[] => {
+                const normalized = normalizeServiceDocument(document);
+                return normalized
+                  ? [{ ...normalized, stageId: normalized.stageId ?? stageId }]
+                  : [];
+              });
+            return { stageId, documents, error: null };
+          } catch (error: unknown) {
+            return {
+              stageId,
+              documents: [],
+              error: typeof error === "string"
+                ? error
+                : error instanceof Error
+                  ? error.message
+                  : "Failed to load service documents.",
+            };
+          }
+        }),
+      );
+      const apiDocuments = documentResults.flatMap((result) => result.documents);
+      const serviceDocumentsError = documentResults.find((result) => result.error)?.error ?? null;
+
+      const stages = stagesForDocuments
+        .map((stage) => {
+          const stageIds = [stage.id, stage.serviceStageId, stage.stageExecutionId, stage.serviceStageExecutionId, stage.executionId]
+            .filter((stageId): stageId is number | string => stageId !== undefined);
+          const detailStage = serviceDetails.stages.find((candidate) =>
+            [candidate.id, candidate.serviceStageId, candidate.stageExecutionId, candidate.serviceStageExecutionId, candidate.executionId]
+              .some((stageId) => stageId !== undefined && stageIds.some((candidateId) => String(candidateId) === String(stageId))),
+          ) ?? serviceDetails.stages.find((candidate) => candidate.order === stage.order);
+          const relatedDocuments = apiDocuments.filter((document) =>
+            document.stageId !== null
+            && document.stageId !== undefined
+            && stageIds.some((stageId) => String(document.stageId) === String(stageId)),
+          );
+          const documentsById = new Map<string, ManagerServiceDocument>();
+          [...(detailStage?.documents ?? []), ...stage.documents, ...relatedDocuments].forEach((document, index) => {
+            const key = document.id === undefined || document.id === null
+              ? `${document.fileName ?? document.originalFileName ?? "document"}-${index}`
+              : String(document.id);
+            documentsById.set(key, document);
+          });
+          return {
+            ...detailStage,
+            ...stage,
+            id: stage.id ?? detailStage?.id,
+            serviceStageId: stage.serviceStageId ?? detailStage?.serviceStageId,
+            status: stage.status ?? detailStage?.status ?? null,
+            apiStatus: stage.apiStatus ?? detailStage?.apiStatus,
+            notes: stage.notes ?? detailStage?.notes ?? null,
+            updated_at: stage.updated_at ?? detailStage?.updated_at ?? null,
+            documents: [...documentsById.values()],
+          };
+        })
+        .sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
       const selectedService = {
         ...serviceDetails,
-        stages: apiStages.length ? apiStages : serviceDetails.stages,
+        stages,
         documents: apiDocuments.length ? apiDocuments : serviceDetails.documents,
       };
 
-      set({ selectedService, serviceDetailLoading: false, serviceDetailError: null });
+      set({
+        selectedService,
+        serviceDetailLoading: false,
+        serviceDetailError: null,
+        serviceDocumentsError,
+        serviceActivities: apiActivities,
+        serviceActivitiesError,
+      });
       return selectedService;
     } catch (error: unknown) {
+      if (isMissingUnassignedUserError(error)) {
+        set({ selectedService: null, serviceDetailLoading: false, serviceDetailError: null });
+        return null;
+      }
       const message = typeof error === "string"
         ? error
         : error instanceof Error
@@ -893,78 +1560,156 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
   },
 
   updateServiceStage: async (payload) => {
-    const shipmentId = payload.shipmentId;
-    const stageExecutionId = payload.stageExecutionId ?? payload.shipmentStageId;
-    if (
-      shipmentId === null ||
-      shipmentId === undefined ||
-      !String(shipmentId).trim() ||
-      stageExecutionId === null ||
-      stageExecutionId === undefined ||
-      !String(stageExecutionId).trim()
-    ) {
-      set({ serviceDetailError: "A service and stage ID are required to update a stage." });
-      return false;
+    set({ serviceDetailError: null });
+    const readPositiveId = (value: string | number | null | undefined): number | null => {
+      const normalized = typeof value === "number" ? String(value) : value?.trim();
+      if (!normalized || !/^[1-9]\d*$/.test(normalized)) return null;
+      const id = Number(normalized);
+      return Number.isSafeInteger(id) ? id : null;
+    };
+    const shipmentId = readPositiveId(payload.shipmentId);
+    const stageExecutionId = readPositiveId(payload.stageExecutionId ?? payload.shipmentStageId);
+    if (shipmentId === null || stageExecutionId === null) {
+      const message = "A valid positive service ID and stage ID are required to update a stage.";
+      set({ serviceDetailError: message });
+      return { success: false, error: message };
     }
 
     set({ serviceDetailLoading: true, serviceDetailError: null });
 
+    const statusMap: Record<string, number> = {
+      notstarted: 1,
+      pending: 2,
+      inprogress: 3,
+      completed: 4,
+      blocked: 5,
+      needsreview: 6,
+    };
+    const normalizedStatusKey = typeof payload.status === "string"
+      ? payload.status.trim().toLowerCase().replaceAll(/[\s_-]+/g, "")
+      : "";
+    const numericStatus = statusMap[normalizedStatusKey] ?? (typeof payload.status === "number" ? payload.status : 3);
+
     try {
-      const userId = payload.userId ?? payload.UserId;
-      await ManagerEndpoints.updateServiceStage({
-        ...payload,
-        userId,
-        UserId: userId,
-      });
-      const refreshedService = await get().fetchServiceById(shipmentId);
-      return refreshedService !== null;
+      const stageUpdatePayload = {
+        shipmentId,
+        shipmentStageId: stageExecutionId,
+        status: payload.status,
+        stageStatus: numericStatus,
+        notes: payload.notes || "",
+        riskLevel: payload.riskLevel,
+      };
+      await ManagerEndpoints.updateServiceStage(stageUpdatePayload);
     } catch (error: unknown) {
+      if (isMissingUnassignedUserError(error)) {
+        const message = "Please assign a valid Case Executor to this service before updating the stage.";
+        set({ serviceDetailLoading: false, serviceDetailError: message });
+        return { success: false, error: message };
+      }
+
       const message = typeof error === "string"
         ? error
         : error instanceof Error
           ? error.message
           : "Failed to update service stage.";
       set({ serviceDetailLoading: false, serviceDetailError: message });
-      return false;
+      return { success: false, error: message };
     }
+
+    set({ serviceDetailLoading: false, serviceDetailError: null });
+    try {
+      await get().fetchServiceById(shipmentId);
+    } catch (refreshError: unknown) {
+      if (!isMissingUnassignedUserError(refreshError)) {
+        console.warn("Stage update succeeded but refreshing details failed.", refreshError);
+      }
+    }
+    return { success: true };
   },
 
   uploadServiceDocument: async (payload) => {
     await ManagerEndpoints.uploadServiceDocument(payload);
   },
 
+  fetchStageDiscussions: async (stageId, serviceId) => {
+    set({ stageDiscussions: [], stageDiscussionsLoading: true, stageDiscussionsError: null });
+    try {
+      const response = await ManagerEndpoints.getStageDiscussions(stageId, serviceId);
+      const payload = unwrapApiData(response);
+      const rows = normalizeServiceCollection(payload, ["discussions", "stageDiscussions", "comments", "messages"]);
+      const discussionRows = rows.length || !isRecord(payload)
+        ? rows
+        : readField(payload, "id", "discussionId", "commentId") !== undefined
+          ? [payload]
+          : [];
+      const discussions = discussionRows
+        .map(normalizeStageDiscussion)
+        .filter((discussion): discussion is ManagerStageDiscussion => discussion !== null);
+      set({
+        stageDiscussions: discussions,
+        stageDiscussionsLoading: false,
+        stageDiscussionsError: null,
+      });
+      return discussions;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to load stage discussions.";
+      set({ stageDiscussions: [], stageDiscussionsLoading: false, stageDiscussionsError: message });
+      return [];
+    }
+  },
+
+  addStageDiscussion: async (payload) => {
+    try {
+      await ManagerEndpoints.addStageDiscussion({
+        ...payload,
+        comment: payload.comment.trim(),
+      });
+      await get().fetchStageDiscussions(payload.stageId, payload.serviceId);
+    } catch (error: unknown) {
+      throw new Error(error instanceof Error ? error.message : "Failed to add stage discussion.");
+    }
+  },
+
+  notifyImporter: async (payload) => {
+    try {
+      await ManagerEndpoints.notifyImporter(payload);
+    } catch (error: unknown) {
+      throw new Error(error instanceof Error ? error.message : "Failed to notify importer.");
+    }
+  },
+
+  escalateService: async (payload) => {
+    try {
+      await ManagerEndpoints.escalateService(payload);
+    } catch (error: unknown) {
+      throw new Error(error instanceof Error ? error.message : "Failed to escalate service.");
+    }
+  },
+
+  fetchConsignmentDetails: async (serviceId) => {
+    set({ consignmentDetails: null, consignmentLoading: true, consignmentError: null });
+    try {
+      const response = await ManagerEndpoints.getConsignmentDetails(serviceId);
+      const details = normalizeConsignmentDetails(unwrapApiData(response));
+      if (!details) {
+        throw new Error("The Manager API returned invalid consignment details.");
+      }
+      set({ consignmentDetails: details, consignmentLoading: false, consignmentError: null });
+      return details;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to load consignment details.";
+      set({ consignmentDetails: null, consignmentLoading: false, consignmentError: message });
+      return null;
+    }
+  },
+
   assignExecutor: async (payload) => {
     set({ loading: true, error: null });
 
     try {
-      const response = await ManagerEndpoints.assignExecutor(payload);
-      const assignment = normalizeAssignment(unwrapApiData(response));
-
-      if (!assignment) {
-        throw new Error("No assignment record returned from the API.");
-      }
-
-      set((state) => ({
-        lastExecutorAssignment: assignment,
-        dashboardData: state.dashboardData
-          ? {
-              ...state.dashboardData,
-              recentServices: state.dashboardData.recentServices.map((item) =>
-                String(item.id ?? item.serviceNumber) === String(assignment.id)
-                  ? {
-                      ...item,
-                      assignedCaseExecutorId: assignment.assignedCaseExecutorId,
-                      lastUpdateDate: assignment.updatedAt,
-                    }
-                  : item,
-              ),
-            }
-          : null,
-        loading: false,
-        error: null,
-      }));
-
-      return assignment;
+      await ManagerEndpoints.assignExecutor(payload);
+      set({ loading: false, error: null });
+      return true;
     } catch (error: unknown) {
       const message = typeof error === "string"
         ? error
@@ -972,7 +1717,7 @@ export const useManagerStore = create<ManagerState>((set, get) => ({
           ? error.message
           : "Failed to assign executor.";
       set({ loading: false, error: message });
-      return null;
+      return false;
     }
   },
 

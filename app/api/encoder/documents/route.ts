@@ -7,6 +7,23 @@ const DATA_ENCODER_ID = process.env.DATA_ENCODER_USER_ID ?? "5";
 const isPositiveId = (value: FormDataEntryValue | null): value is string =>
 	typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0;
 
+export async function GET(request: Request) {
+	const incomingUrl = new URL(request.url);
+	const documentId = incomingUrl.searchParams.get("downloadId")?.trim() ?? "";
+	if (!/^[1-9]\d*$/.test(documentId) || !Number.isSafeInteger(Number(documentId))) {
+		return NextResponse.json({ error: "A valid document ID is required." }, { status: 400 });
+	}
+
+	return proxyDataEncoderRequest(
+		new Request(request.url, {
+			method: "GET",
+			headers: { Accept: "*/*" },
+		}),
+		"GET",
+		`${API_ROUTES.document.downloadDocument}?documentId=${encodeURIComponent(documentId)}`,
+	);
+}
+
 export async function POST(request: Request) {
 	if (!/^\d+$/.test(DATA_ENCODER_ID) || Number(DATA_ENCODER_ID) <= 0) {
 		return NextResponse.json({ error: "The data encoder ID is not configured." }, { status: 500 });

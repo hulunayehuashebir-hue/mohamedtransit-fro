@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import useAuthStore from '@/modules/auth/auth.store';
+import { getCustomerNotifications, markCustomerNotificationAsRead } from '@/modules/customer/customer.endpoint';
 import { createNotification as createNotificationRequest, getDocumentMonitoringAlerts, getUnreadNotificationCount, getUserNotifications, markAllNotificationsAsRead, markNotificationAsRead, sendBulkNotifications as sendBulkNotificationsRequest } from './notification.endpoint';
 import { NotificationItem, NotificationCategory, DocumentMonitoringAlertsResponse } from './notification.types';
 
@@ -14,9 +15,16 @@ const readFlag = (value: unknown): boolean => {
   return false;
 };
 
+const readCount = (value: unknown): number | null => {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+};
+
 interface NotificationState {
   notifications: NotificationItem[];
   unreadCount: number;
+  totalCount: number;
   page: number;
   pageSize: number;
   filterTab: "All" | NotificationCategory;
@@ -54,6 +62,22 @@ const getCurrentUserId = (): string | number => {
     throw new Error('Your user ID is unavailable. Sign in again to load notifications.');
   }
   return userId;
+};
+
+const hasCustomerRole = (): boolean => {
+  const user = useAuthStore.getState().user;
+  const visit = (value: unknown): boolean => {
+    if (typeof value === "string") {
+      const role = value.toLowerCase().replace(/[^a-z]/g, "");
+      return role.includes("customer") || role.includes("importer");
+    }
+    if (Array.isArray(value)) return value.some(visit);
+    if (!isRecord(value)) return false;
+    return ["roleName", "name", "role", "roles", "userRoles"].some((key) =>
+      visit(readField(value, key)),
+    );
+  };
+  return [user?.roles, user?.userRoles, user?.roleName].some(visit);
 };
 
 const unwrapResponse = (value: unknown): unknown => {
@@ -109,12 +133,12 @@ const formatNotificationTime = (value: unknown): string => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
 
-  const elapsedMinutes = Math.round((date.getTime() - Date.now()) / 60_000);
+  const elapsedMinutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60_000));
   const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
-  if (Math.abs(elapsedMinutes) < 60) return formatter.format(elapsedMinutes, 'minute');
+  if (elapsedMinutes < 60) return formatter.format(-elapsedMinutes, 'minute');
   const elapsedHours = Math.round(elapsedMinutes / 60);
-  if (Math.abs(elapsedHours) < 24) return formatter.format(elapsedHours, 'hour');
-  return formatter.format(Math.round(elapsedHours / 24), 'day');
+  if (elapsedHours < 24) return formatter.format(-elapsedHours, 'hour');
+  return formatter.format(-Math.round(elapsedHours / 24), 'day');
 };
 
 const normalizeNotification = (value: unknown): NotificationItem | null => {
@@ -174,6 +198,7 @@ const normalizeDocumentMonitoringAlerts = (value: unknown): DocumentMonitoringAl
 export const useNotificationStore = create<NotificationState>((set, get) => ({
   notifications: [],
   unreadCount: 0,
+  totalCount: 0,
   page: 1,
   pageSize: 20,
   filterTab: "All",
@@ -194,7 +219,11 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     if (!notification || notification.isRead) return false;
 
     try {
-      await markNotificationAsRead(id);
+      if (hasCustomerRole()) {
+        await markCustomerNotificationAsRead(id);
+      } else {
+        await markNotificationAsRead(id);
+      }
       set((state) => ({
         notifications: state.notifications.map((item) =>
           item.id === id ? { ...item, isRead: true, isNew: false } : item
@@ -212,7 +241,14 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
 
   markAllAsRead: async () => {
     try {
-      await markAllNotificationsAsRead(getCurrentUserId());
+      if (hasCustomerRole()) {
+        const unread = get().notifications.filter((notification) => !notification.isRead);
+        await Promise.all(unread.map((notification) =>
+          markCustomerNotificationAsRead(notification.id),
+        ));
+      } else {
+        await markAllNotificationsAsRead(getCurrentUserId());
+      }
       set((state) => ({
         notifications: state.notifications.map((notification) => ({
           ...notification,
@@ -260,7 +296,9 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     set({ loading: true, error: null });
 
     try {
-      const response = await getUserNotifications(getCurrentUserId());
+      const response = hasCustomerRole()
+        ? await getCustomerNotifications()
+        : await getUserNotifications(getCurrentUserId());
       const payload = unwrapResponse(response);
       const list = readNotificationList(payload);
       const notifications = list
@@ -269,13 +307,17 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       const unreadCountValue = isRecord(payload) ? readField(payload, 'unreadCount') : undefined;
       const pageValue = isRecord(payload) ? readField(payload, 'page') : undefined;
       const pageSizeValue = isRecord(payload) ? readField(payload, 'pageSize') : undefined;
-      const unreadCount = typeof unreadCountValue === 'number'
-        ? unreadCountValue
-        : notifications.filter((notification) => !notification.isRead).length;
+      const totalCountValue = isRecord(payload)
+        ? readField(payload, 'totalCount', 'totalRecords', 'total', 'count')
+        : undefined;
+      const unreadCount = readCount(unreadCountValue)
+        ?? notifications.filter((notification) => !notification.isRead).length;
+      const totalCount = readCount(totalCountValue) ?? notifications.length;
 
       set({
         notifications,
         unreadCount,
+        totalCount,
         page: typeof pageValue === 'number' ? pageValue : 1,
         pageSize: typeof pageSizeValue === 'number' ? pageSizeValue : 20,
         loading: false,
@@ -287,6 +329,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       set({
         notifications: [],
         unreadCount: 0,
+        totalCount: 0,
         loading: false,
         error: message,
       });
@@ -296,9 +339,19 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
 
   fetchUnreadCount: async () => {
     try {
+      if (hasCustomerRole()) {
+        const payload = unwrapResponse(await getCustomerNotifications());
+        const notifications = readNotificationList(payload)
+          .map(normalizeNotification)
+          .filter((notification): notification is NotificationItem => notification !== null);
+        const unreadCount = notifications.filter((notification) => !notification.isRead).length;
+        set({ unreadCount, error: null });
+        return unreadCount;
+      }
+
       const response = unwrapResponse(await getUnreadNotificationCount(getCurrentUserId()));
-      const unreadCount = isRecord(response) ? readField(response, 'unreadCount') : undefined;
-      if (typeof unreadCount !== 'number' || !Number.isFinite(unreadCount)) {
+      const unreadCount = readCount(isRecord(response) ? readField(response, 'unreadCount') : undefined);
+      if (unreadCount === null) {
         throw new Error('Unexpected unread notification count response.');
       }
 

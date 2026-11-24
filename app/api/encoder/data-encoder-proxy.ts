@@ -28,7 +28,7 @@ export const proxyDataEncoderRequest = async (
 
 	const headers = new Headers({
 		Authorization: `Bearer ${accessToken}`,
-		Accept: "application/json",
+		Accept: request.headers.get("accept") ?? "application/json",
 	});
 	let body: BodyInit | undefined;
 
@@ -65,6 +65,8 @@ export const proxyDataEncoderRequest = async (
 		if (responseType) responseHeaders.set("Content-Type", responseType);
 		const location = response.headers.get("Location");
 		if (location) responseHeaders.set("Location", location);
+		const contentDisposition = response.headers.get("Content-Disposition");
+		if (contentDisposition) responseHeaders.set("Content-Disposition", contentDisposition);
 		return new Response(response.body, {
 			status: response.status,
 			headers: responseHeaders,

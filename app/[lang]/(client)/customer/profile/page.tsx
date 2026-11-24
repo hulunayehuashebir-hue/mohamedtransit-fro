@@ -37,6 +37,11 @@ const changePasswordSchema = z
 type ChangePasswordFormData = z.infer<typeof changePasswordSchema>;
 
 const editProfileSchema = z.object({
+  businessName: z.string().trim().min(1, "Business name is required"),
+  businessAddress: z.string().trim().min(1, "Business address is required"),
+  city: z.string().trim().min(1, "City is required"),
+  state: z.string().trim().min(1, "State / region is required"),
+  postalCode: z.string().trim().min(1, "Postal code is required"),
   contactPerson: z.string().trim().min(1, "Contact name is required"),
   contactEmail: z.string().trim().email("Enter a valid email address"),
   contactPhone: z.string().trim().min(5, "Enter a valid phone number"),
@@ -153,7 +158,7 @@ export default function CustomerProfilePage() {
       "AvatarUrl",
     ) ||
     user?.profilePhoto ||
-    "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80";
+    "";
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
@@ -184,6 +189,11 @@ export default function CustomerProfilePage() {
 
   useEffect(() => {
     resetProfile({
+      businessName: profile?.businessName || "",
+      businessAddress: profile?.businessAddress || "",
+      city: profile?.city || "",
+      state: profile?.state || "",
+      postalCode: profile?.postalCode || "",
       contactPerson: profile?.contactPerson || profileName,
       contactEmail: profile?.contactEmail || readProfileText(accountProfile, "email", "Email") || user?.email || "",
       contactPhone: profile?.contactPhone || readProfileText(accountProfile, "phone", "phoneNumber", "Phone", "PhoneNumber") || user?.phone || user?.phoneNumber || "",
@@ -201,11 +211,11 @@ export default function CustomerProfilePage() {
 
     try {
       await updateCustomerProfile({
-        businessName: profile?.businessName ?? undefined,
-        businessAddress: profile?.businessAddress ?? undefined,
-        city: profile?.city ?? undefined,
-        state: profile?.state ?? undefined,
-        postalCode: profile?.postalCode ?? undefined,
+        businessName: data.businessName,
+        businessAddress: data.businessAddress,
+        city: data.city,
+        state: data.state,
+        postalCode: data.postalCode,
         contactPerson: data.contactPerson,
         contactEmail: data.contactEmail,
         contactPhone: data.contactPhone,
@@ -266,7 +276,7 @@ export default function CustomerProfilePage() {
         <section className="rounded border border-slate-200 bg-white shadow-sm">
           <div className="flex items-center gap-4 border-b border-slate-200 p-5">
             <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded bg-blue-100 text-blue-700 font-bold text-lg">
-              {user?.profilePhoto || user?.firstName ? (
+              {profilePhoto ? (
                 <Image
                   src={profilePhoto}
                   alt={profileName}
@@ -310,6 +320,19 @@ export default function CustomerProfilePage() {
 
           {isEditingProfile ? (
             <form id="customer-profile-edit" onSubmit={handleProfileSubmit(onProfileSubmit)} className="grid gap-4 p-5 sm:grid-cols-2">
+              {([
+                ["businessName", isAm ? "የንግድ ስም" : "Business name"],
+                ["businessAddress", isAm ? "የንግድ አድራሻ" : "Business address"],
+                ["city", isAm ? "ከተማ" : "City"],
+                ["state", isAm ? "ክልል" : "State / region"],
+                ["postalCode", isAm ? "የፖስታ ኮድ" : "Postal code"],
+              ] as const).map(([name, label]) => (
+                <div key={name}>
+                  <label htmlFor={name} className="mb-1 block text-xs font-medium text-slate-600">{label}</label>
+                  <input id={name} {...registerProfile(name)} className="w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                  {profileErrors[name] && <p className="mt-1 text-xs text-rose-600">{profileErrors[name]?.message}</p>}
+                </div>
+              ))}
               <div>
                 <label htmlFor="contactPerson" className="mb-1 block text-xs font-medium text-slate-600">{isAm ? "የእውቂያ ሰው" : "Contact person"}</label>
                 <input id="contactPerson" {...registerProfile("contactPerson")} className="w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
@@ -351,7 +374,7 @@ export default function CustomerProfilePage() {
                 <MapPin className="h-4 w-4" /> {isAm ? "ድርጅት" : "Organisation"}
               </dt>
               <dd className="mt-2 text-sm font-medium text-slate-800">
-                {profile?.businessName || "Horizon Agro Import PLC"}
+                {profile?.businessName || "—"}
               </dd>
             </div>
 
@@ -361,6 +384,15 @@ export default function CustomerProfilePage() {
               </dt>
               <dd className="mt-2 text-sm font-medium text-slate-800">
                 {profile?.businessAddress || "-"}
+              </dd>
+            </div>
+
+            <div>
+              <dt className="flex items-center gap-2 text-xs text-slate-500">
+                <MapPin className="h-4 w-4" /> {isAm ? "ከተማ / ክልል" : "City / region"}
+              </dt>
+              <dd className="mt-2 text-sm font-medium text-slate-800">
+                {[profile?.city, profile?.state, profile?.postalCode].filter(Boolean).join(", ") || "—"}
               </dd>
             </div>
 

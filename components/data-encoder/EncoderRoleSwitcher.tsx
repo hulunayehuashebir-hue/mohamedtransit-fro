@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ChevronDown, LogOut } from "lucide-react";
 import useAuthStore from "@/modules/auth/auth.store";
@@ -13,6 +13,8 @@ const roles = [
 	{ id: "assessor", label: "Assessor", href: (locale: string) => `/${locale}/admin/assessor` },
 	{ id: "data-encoder", label: "Data Encoder", href: (locale: string) => `/${locale}/admin/data-encoder/dashboard` },
 ] as const;
+
+const subscribeToHydration = () => () => {};
 
 interface EncoderRoleSwitcherProps {
 	collapsed?: boolean;
@@ -27,6 +29,12 @@ export default function EncoderRoleSwitcher({
 	const router = useRouter();
 	const logout = useAuthStore((state) => state.logout);
 	const user = useAuthStore((state) => state.user);
+	const hasHydrated = useSyncExternalStore(
+		subscribeToHydration,
+		() => true,
+		() => false,
+	);
+	const displayUser = hasHydrated ? user : null;
 	const [open, setOpen] = useState(false);
 	const firstSegment = pathname.split("/").filter(Boolean)[0];
 	const locale = firstSegment === "am" || firstSegment === "en" ? firstSegment : "en";
@@ -41,14 +49,14 @@ export default function EncoderRoleSwitcher({
 					: "data-encoder";
 	const currentRole = roles.find((role) => role.id === activeRole) ?? roles[4];
 	const displayName =
-		[user?.firstName, user?.lastName].filter(Boolean).join(" ") ||
-		user?.username ||
-		user?.email?.split("@")[0] ||
-		"Data Encoder";
+		[displayUser?.firstName, displayUser?.lastName].filter(Boolean).join(" ") ||
+		displayUser?.username ||
+		displayUser?.email?.split("@")[0] ||
+		"Signed out";
 	const initials =
 		displayName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "DE";
 	const profilePhotoValue =
-		profilePhotoUrlOverride || user?.profilePictureUrl || user?.profilePhoto;
+		profilePhotoUrlOverride || displayUser?.profilePictureUrl || displayUser?.profilePhoto;
 	const profilePhotoUrl = resolveApiAssetUrl(profilePhotoValue);
 	const avatar = (
 		<span className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-blue-100 text-xs font-bold text-blue-700">
@@ -83,7 +91,7 @@ export default function EncoderRoleSwitcher({
 				onClick={() => setOpen((isOpen) => !isOpen)}
 				aria-expanded={open}
 				aria-haspopup="menu"
-				title={collapsed ? "Switch demonstration role" : undefined}
+				title={collapsed ? "Switch workspace" : undefined}
 				className={`flex w-full items-center rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-left transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
 					collapsed ? "justify-center" : "justify-between"
 				}`}
@@ -107,13 +115,13 @@ export default function EncoderRoleSwitcher({
 			{open && (
 				<div
 					role="menu"
-					aria-label="Switch demonstration role"
+					aria-label="Switch workspace"
 					className={`absolute bottom-[calc(100%+8px)] z-50 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${
 						collapsed ? "left-0 w-64" : "left-0 right-0"
 					}`}
 				>
 					<div className="border-b border-slate-100 px-3 py-2">
-						<p className="text-xs font-bold text-slate-800">Switch demonstration role</p>
+						<p className="text-xs font-bold text-slate-800">Switch workspace</p>
 					</div>
 					<div className="space-y-0.5 py-1">
 						{roles.map((role) => {

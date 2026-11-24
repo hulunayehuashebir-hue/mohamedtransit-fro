@@ -107,7 +107,7 @@ const caseExecutorItems = [
   },
   {
     label: "Risk & Compliance",
-    href: "/admin/case-Executer/risk&compliance",
+    href: "/admin/case-Executer/risk-compliance",
     icon: ShieldAlert,
     group: "work",
   },

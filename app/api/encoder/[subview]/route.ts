@@ -2,10 +2,6 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { normalizeApiBaseUrl } from "@/modules/utils/axios/config";
 
-const ENCODER_ID =
-  process.env.DATA_ENCODER_USER_ID ??
-  "5";
-
 type JsonRecord = Record<string, unknown>;
 
 const isRecord = (value: unknown): value is JsonRecord =>
@@ -25,6 +21,55 @@ const normalizeFlags = (value: unknown): unknown => {
       }
       return [key, normalizeFlags(item)];
     }),
+  );
+};
+
+const safeUserFields = new Set([
+  "statuscode",
+  "error",
+  "errors",
+  "message",
+  "response",
+  "data",
+  "payload",
+  "result",
+  "users",
+  "userlist",
+  "items",
+  "records",
+  "rows",
+  "id",
+  "userid",
+  "username",
+  "firstname",
+  "givenname",
+  "lastname",
+  "surname",
+  "email",
+  "phone",
+  "isaccountlocked",
+  "islocked",
+  "isactive",
+  "isenabled",
+  "accountstatus",
+  "userstatus",
+  "recordstatus",
+  "roles",
+  "userroles",
+  "role",
+  "rolename",
+  "name",
+  "displayname",
+]);
+
+const sanitizeUserData = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(sanitizeUserData);
+  if (!isRecord(value)) return value;
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => safeUserFields.has(key.toLowerCase()))
+      .map(([key, nested]) => [key, sanitizeUserData(nested)]),
   );
 };
 
@@ -56,11 +101,84 @@ const readJsonBody = async (response: Response): Promise<unknown> => {
   }
 };
 
+class UserProfileRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+const readAuthenticatedUserId = (value: unknown, depth = 0): number | null => {
+  if (depth > 8 || !isRecord(value)) return null;
+
+  for (const key of ["userId", "id", "accountId", "sub"]) {
+    const actualKey = Object.keys(value).find(
+      (candidate) => candidate.toLowerCase() === key.toLowerCase(),
+    );
+    const candidate = actualKey ? value[actualKey] : undefined;
+    const normalized =
+      typeof candidate === "number"
+        ? String(candidate)
+        : typeof candidate === "string"
+          ? candidate.trim()
+          : "";
+    if (/^[1-9]\d*$/.test(normalized)) {
+      const id = Number(normalized);
+      if (Number.isSafeInteger(id)) return id;
+    }
+  }
+
+  for (const key of ["data", "payload", "response", "result", "profile", "user", "account"]) {
+    const actualKey = Object.keys(value).find(
+      (candidate) => candidate.toLowerCase() === key.toLowerCase(),
+    );
+    const nested = actualKey ? value[actualKey] : undefined;
+    const id = readAuthenticatedUserId(nested, depth + 1);
+    if (id !== null) return id;
+  }
+
+  return null;
+};
+
+const getDataEncoderUserId = async (
+  backendUrl: string,
+  accessToken: string,
+): Promise<number> => {
+  const configuredId = process.env.DATA_ENCODER_USER_ID?.trim();
+  if (configuredId) {
+    if (!/^[1-9]\d*$/.test(configuredId) || !Number.isSafeInteger(Number(configuredId))) {
+      throw new Error("DATA_ENCODER_USER_ID must be a positive integer.");
+    }
+    return Number(configuredId);
+  }
+
+  const response = await fetch(`${backendUrl}/Account/GetProfile`, {
+    headers: {
+      Authorization: "Bearer " + accessToken,
+      Accept: "application/json",
+    },
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  });
+  const profile = await readJsonBody(response);
+  if (!response.ok) {
+    throw new UserProfileRequestError(
+      `Unable to identify the signed-in data encoder (status ${response.status}).`,
+      response.status,
+    );
+  }
+
+  const userId = readAuthenticatedUserId(profile);
+  if (userId === null) {
+    throw new Error("The signed-in account profile did not include a valid user ID.");
+  }
+  return userId;
+};
+
 type RouteContext = { params: Promise<{ subview: string }> };
 
 export async function GET(request: Request, { params }: RouteContext) {
   const { subview } = await params;
-  const allowedViews = new Set(["customers", "dashboard"]);
+  const allowedViews = new Set(["customers", "dashboard", "users"]);
   if (!allowedViews.has(subview)) {
     return jsonResponse({ error: "Unknown encoder resource." }, 404);
   }
@@ -78,6 +196,8 @@ export async function GET(request: Request, { params }: RouteContext) {
 
   if (subview === "dashboard") {
     endpoint = `${backendUrl}/DataEncoder/GetDashboard`;
+  } else if (subview === "users") {
+    endpoint = `${backendUrl}/User/GetAll`;
   } else {
     const recordStatus = incomingUrl.searchParams.get("recordStatus");
     if (!recordStatus?.trim()) {
@@ -101,7 +221,10 @@ export async function GET(request: Request, { params }: RouteContext) {
       signal: AbortSignal.timeout(15_000),
     });
     const body = await readJsonBody(response);
-    return jsonResponse(normalizeFlags(body), response.status);
+    return jsonResponse(
+      normalizeFlags(subview === "users" ? sanitizeUserData(body) : body),
+      response.status,
+    );
   } catch (error: unknown) {
     console.error(`Data encoder ${subview} request failed:`, error);
     return jsonResponse(
@@ -113,13 +236,92 @@ export async function GET(request: Request, { params }: RouteContext) {
 
 export async function POST(request: Request, { params }: RouteContext) {
   const { subview } = await params;
-  if (subview !== "customers" && subview !== "shipments") {
+  if (subview !== "customers" && subview !== "shipments" && subview !== "users") {
     return jsonResponse({ error: "Unknown encoder submission." }, 404);
   }
 
   const accessToken = await readAccessToken();
   if (!accessToken) {
     return jsonResponse({ error: "Authentication required." }, 401);
+  }
+
+  if (subview === "users") {
+    let submittedForm: FormData;
+    try {
+      submittedForm = await request.formData();
+    } catch {
+      return jsonResponse({ error: "A valid user form is required." }, 400);
+    }
+
+    const readText = (name: string): string => {
+      const value = submittedForm.get(name);
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const username = readText("Username");
+    const firstName = readText("FirstName");
+    const lastName = readText("LastName");
+    const email = readText("Email");
+    const phone = readText("Phone");
+    const password = submittedForm.get("Password");
+    const profileFile = submittedForm.get("ProfileFile");
+    const roleId = Number(readText("Roles"));
+
+    if (!username || !firstName || !lastName || !email || typeof password !== "string" || password.length < 8) {
+      return jsonResponse(
+        { error: "Username, first name, last name, valid email, and a password of at least 8 characters are required." },
+        400,
+      );
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return jsonResponse({ error: "Enter a valid user email address." }, 400);
+    }
+    if (!Number.isSafeInteger(roleId) || roleId <= 0) {
+      return jsonResponse({ error: "Select a valid Customer or Importer role." }, 400);
+    }
+    if (!profileFile || typeof profileFile === "string" || profileFile.size === 0) {
+      return jsonResponse({ error: "A profile photo is required. Choose a JPG, PNG, or WEBP image up to 5 MB." }, 400);
+    }
+    if (!["image/jpeg", "image/png", "image/webp"].includes(profileFile.type)) {
+      return jsonResponse({ error: "The profile photo must be a JPG, PNG, or WEBP image." }, 400);
+    }
+    if (profileFile.size > 5 * 1024 * 1024) {
+      return jsonResponse({ error: "The profile photo must be 5 MB or smaller." }, 400);
+    }
+
+    const backendUrl = normalizeApiBaseUrl(
+      process.env.BACKEND_API_URL ?? process.env.NEXT_PUBLIC_API_URL,
+    );
+    const payload = new FormData();
+    payload.set("Username", username);
+    payload.set("FirstName", firstName);
+    payload.set("LastName", lastName);
+    payload.set("Email", email);
+    payload.set("Phone", phone);
+    payload.set("Password", password);
+    payload.set("IsSuperAdmin", "false");
+    payload.set("Roles", String(roleId));
+    payload.set("ProfileFile", profileFile, profileFile.name);
+
+    try {
+      const response = await fetch(`${backendUrl}/User/Create`, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + accessToken,
+          Accept: "application/json",
+        },
+        body: payload,
+        cache: "no-store",
+        signal: AbortSignal.timeout(20_000),
+      });
+      const body = await readJsonBody(response);
+      return jsonResponse(normalizeFlags(sanitizeUserData(body)), response.status);
+    } catch (error: unknown) {
+      console.error("Data encoder user creation failed:", error);
+      return jsonResponse(
+        { error: "Unable to reach the backend to create the customer account." },
+        502,
+      );
+    }
   }
 
   let submitted: unknown;
@@ -163,12 +365,20 @@ export async function POST(request: Request, { params }: RouteContext) {
     ) {
       return jsonResponse({ error: "Enter a valid customer contact email." }, 400);
     }
-    if (!/^\d+$/.test(ENCODER_ID)) {
-      return jsonResponse({ error: "The data encoder ID is not configured." }, 500);
-    }
-    const userId = Number(submitted.userId);
+    const submittedUserId = submitted.userId;
+    const normalizedUserId =
+      typeof submittedUserId === "string" ? submittedUserId.trim() : submittedUserId;
+    const userId =
+      typeof normalizedUserId === "number"
+        ? normalizedUserId
+        : typeof normalizedUserId === "string" && /^\d+$/.test(normalizedUserId)
+          ? Number(normalizedUserId)
+          : Number.NaN;
     if (!Number.isSafeInteger(userId) || userId <= 0) {
-      return jsonResponse({ error: "A valid authenticated user ID is required to create a customer." }, 400);
+      return jsonResponse(
+        { error: "A valid customer user ID is required. Select or create an active Customer/Importer account." },
+        400,
+      );
     }
     values.userId = userId;
     const expiry = submitted.importLicenseExpiry;
@@ -180,10 +390,19 @@ export async function POST(request: Request, { params }: RouteContext) {
     } else {
       values.importLicenseExpiry = null;
     }
-    values.CreatedByDataEncoderId = Number(ENCODER_ID);
-    endpoint = `${normalizeApiBaseUrl(
+    const backendUrl = normalizeApiBaseUrl(
       process.env.BACKEND_API_URL ?? process.env.NEXT_PUBLIC_API_URL,
-    )}/DataEncoder/CreateCustomer`;
+    );
+    try {
+      values.createdByDataEncoderId = await getDataEncoderUserId(backendUrl, accessToken);
+    } catch (error: unknown) {
+      console.error("Unable to identify the signed-in data encoder:", error);
+      return jsonResponse(
+        { error: error instanceof Error ? error.message : "Unable to identify the signed-in data encoder." },
+        error instanceof UserProfileRequestError ? error.status : 502,
+      );
+    }
+    endpoint = `${backendUrl}/DataEncoder/CreateCustomer`;
     payload = values;
   } else {
     const customerId = Number(submitted.customerId);

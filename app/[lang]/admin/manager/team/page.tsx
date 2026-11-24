@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { AlertCircle, LoaderCircle, Plus, RefreshCw, Search, ShieldCheck, Users } from "lucide-react";
+import { AlertCircle, FileImage, LoaderCircle, Plus, RefreshCw, Search, ShieldCheck, Users } from "lucide-react";
 import { useManagerStore } from "@/modules/manager/manager.store";
 import { ManagerEndpoints } from "@/modules/manager/manager.endpoint";
 import type { ManagerStaff } from "@/modules/manager/manager.type";
 import { signup, updateUser } from "@/modules/auth/auth.endpoint";
-import type { CreateUserRequest } from "@/modules/auth/auth.types";
 import { useRolesStore } from "@/modules/roles/roles.store";
 import type { RoleDto } from "@/modules/roles/roles.types";
 
@@ -98,11 +97,24 @@ export default function TeamPage() {
   const fetchStaff = useManagerStore((state) => state.fetchStaff);
   const roles = useRolesStore((state) => state.roles);
   const fetchRoles = useRolesStore((state) => state.fetchRoles);
+  const availableRoles = useMemo(() => {
+    const roleById = new Map<number, RoleDto>();
+    for (const role of roles) {
+      if (role.id !== undefined) roleById.set(role.id, role);
+    }
+    for (const member of staff) {
+      for (const role of member.assignedRoles ?? []) {
+        if (!roleById.has(role.id)) roleById.set(role.id, role);
+      }
+    }
+    return [...roleById.values()];
+  }, [roles, staff]);
   const [search, setSearch] = useState("");
   const [rolesLoading, setRolesLoading] = useState(true);
   const [rolesError, setRolesError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState<StaffForm>(emptyStaffForm);
+  const [profilePhoto, setProfilePhoto] = useState<File | null>(null);
   const [selectedStaff, setSelectedStaff] = useState<ManagerStaff | null>(null);
   const [permissionRoleIds, setPermissionRoleIds] = useState<number[]>([]);
   const [permissionsLoading, setPermissionsLoading] = useState(false);
@@ -153,7 +165,7 @@ export default function TeamPage() {
       const record = unwrapRecord(await ManagerEndpoints.getStaffById(member.id));
       if (!record) throw new Error("The user details response did not contain a staff record.");
       const userRecord = unwrapRecord(record.user) ?? record;
-      const roleIds = roleIdsFromRecord(userRecord, roles);
+      const roleIds = roleIdsFromRecord(userRecord, availableRoles);
       setPermissionRoleIds(roleIds.length ? roleIds : member.roleIds ?? []);
     } catch (permissionError: unknown) {
       setSelectedStaff(null);
@@ -165,23 +177,38 @@ export default function TeamPage() {
 
   const submitStaff = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!profilePhoto) {
+      setActionError("Choose a profile photo before creating the staff member.");
+      return;
+    }
+    if (!["image/jpeg", "image/png", "image/webp"].includes(profilePhoto.type)) {
+      setActionError("Choose a JPG, PNG, or WEBP profile photo.");
+      return;
+    }
+    if (profilePhoto.size > 5 * 1024 * 1024) {
+      setActionError("The profile photo must be 5 MB or smaller.");
+      return;
+    }
+
     setSaving(true);
     setActionError(null);
     setActionMessage(null);
 
-    const payload: CreateUserRequest = {
-      username: addForm.username.trim(),
-      firstName: addForm.firstName.trim(),
-      lastName: addForm.lastName.trim(),
-      email: addForm.email.trim(),
-      phone: addForm.phone.trim() || undefined,
-      password: addForm.password,
-      roles: addForm.roleId ? [Number(addForm.roleId)] : [],
-    };
+    const payload = new FormData();
+    payload.append("Username", addForm.username.trim());
+    payload.append("FirstName", addForm.firstName.trim());
+    payload.append("LastName", addForm.lastName.trim());
+    payload.append("Email", addForm.email.trim());
+    payload.append("Phone", addForm.phone.trim());
+    payload.append("Password", addForm.password);
+    payload.append("IsSuperAdmin", "false");
+    payload.append("Roles", addForm.roleId);
+    payload.append("ProfileFile", profilePhoto, profilePhoto.name);
 
     try {
       await signup(payload);
       setAddForm(emptyStaffForm);
+      setProfilePhoto(null);
       setAddOpen(false);
       try {
         await refreshStaffAndCheck();
@@ -223,7 +250,7 @@ export default function TeamPage() {
     const names = member.roleNames?.length
       ? member.roleNames
       : (member.roleIds ?? []).flatMap((roleId) => {
-          const role = roles.find((item) => item.id === roleId);
+          const role = availableRoles.find((item) => item.id === roleId);
           return role ? [role.roleName] : [];
         });
     return names.join(", ") || "Not provided";
@@ -243,6 +270,7 @@ export default function TeamPage() {
             onClick={() => {
               setActionError(null);
               setActionMessage(null);
+              setProfilePhoto(null);
               setAddOpen(true);
             }}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
@@ -397,16 +425,40 @@ export default function TeamPage() {
                       </label>
                     ))}
                     <label className="block text-xs font-medium text-slate-700 sm:col-span-2">
+                      Profile photo <span className="text-red-600">*</span>
+                      <span className="mt-1 block font-normal text-slate-500">
+                        {profilePhoto
+                          ? `${profilePhoto.name} · ${(profilePhoto.size / (1024 * 1024)).toFixed(2)} MB`
+                          : "Choose a JPG, PNG, or WEBP image, up to 5 MB."}
+                      </span>
+                      <span className="mt-2 flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2">
+                        <FileImage className="h-4 w-4 shrink-0 text-slate-500" />
+                        <input
+                          required
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={(event) => setProfilePhoto(event.currentTarget.files?.[0] ?? null)}
+                          className="min-w-0 flex-1 text-xs font-normal text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-slate-700"
+                        />
+                      </span>
+                    </label>
+                    <label className="block text-xs font-medium text-slate-700 sm:col-span-2">
                       Role
                       <select
                         required
                         value={addForm.roleId}
                         onChange={(event) => setAddForm((form) => ({ ...form, roleId: event.target.value }))}
-                        disabled={rolesLoading || roles.length === 0}
+                        disabled={availableRoles.length === 0}
                         className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
                       >
-                        <option value="">{rolesLoading ? "Loading roles..." : "Select a role"}</option>
-                        {roles.map((role) => (
+                        <option value="">
+                          {rolesLoading
+                            ? "Loading roles..."
+                            : availableRoles.length
+                              ? "Select a role"
+                              : rolesError || "No roles available"}
+                        </option>
+                        {availableRoles.map((role) => (
                           <option key={role.id ?? role.roleName} value={role.id ?? ""} disabled={role.id === undefined}>
                             {role.roleName}
                           </option>
@@ -414,7 +466,7 @@ export default function TeamPage() {
                       </select>
                     </label>
                   </div>
-                  {rolesError && (
+                  {rolesError && availableRoles.length === 0 && (
                     <p role="alert" className="flex items-center gap-2 text-xs text-red-700">
                       <AlertCircle className="h-4 w-4" />
                       {rolesError}
@@ -426,7 +478,7 @@ export default function TeamPage() {
                     </button>
                     <button
                       type="submit"
-                      disabled={saving || rolesLoading || roles.length === 0}
+                      disabled={saving || availableRoles.length === 0}
                       className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-60"
                     >
                       {saving ? "Creating..." : "Create staff member"}
@@ -443,13 +495,13 @@ export default function TeamPage() {
                     <LoaderCircle className="h-4 w-4 animate-spin" />
                     Loading current permissions...
                   </p>
-                ) : roles.length === 0 ? (
+                ) : availableRoles.length === 0 ? (
                   <p role="alert" className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                     No roles were returned by the roles API. Permissions cannot be edited.
                   </p>
                 ) : (
                   <form onSubmit={(event) => void savePermissions(event)} className="mt-5 space-y-2">
-                    {roles.map((role) => {
+                    {availableRoles.map((role) => {
                       const roleId = role.id;
                       const checked = roleId !== undefined && permissionRoleIds.includes(roleId);
                       return (

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { CustomerPageHeader } from "@/features/customer/components/CustomerPageHeader";
 import useAuthStore from "@/modules/auth/auth.store";
+import { updateCustomerInspectionType } from "@/modules/customer/customer.endpoint";
 
 type ViewKey = "shipments" | "tax-records" | "documents" | "support-requests";
 type TaxStatus = "Unpaid" | "Paid";
@@ -33,6 +34,7 @@ interface Shipment {
   destination: string;
   createdAt: string | null;
   updatedAt: string | null;
+  inspectionType: string;
 }
 
 interface StageExecution {
@@ -112,6 +114,10 @@ const supportedViews: ViewKey[] = [
   "support-requests",
 ];
 
+const developmentVerificationBypass =
+  process.env.NODE_ENV === "development" &&
+  process.env.NEXT_PUBLIC_CUSTOMER_VERIFICATION_BYPASS === "true";
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -138,7 +144,9 @@ const extractRows = (value: unknown): Record<string, unknown>[] => {
       candidate.response ??
       candidate.result ??
       candidate.items ??
-      candidate.records;
+      candidate.records ??
+      candidate.services ??
+      candidate.myServices;
   }
   if (candidate === null || candidate === undefined) return [];
   throw new Error("The backend response did not contain a list.");
@@ -205,6 +213,7 @@ const mapShipment = (record: Record<string, unknown>): Shipment => ({
   destination: readString(record, "destination") || "Not specified",
   createdAt: readString(record, "createAt", "createdAt") || null,
   updatedAt: readString(record, "updatedAt") || null,
+  inspectionType: readString(record, "inspectionType", "inspectionChannel"),
 });
 
 const mapStageExecution = (
@@ -465,6 +474,27 @@ export default function CustomerDashboardPage() {
   const [ticketSubmitting, setTicketSubmitting] = useState(false);
   const [ticketError, setTicketError] = useState<string | null>(null);
   const [ticketSuccess, setTicketSuccess] = useState(false);
+  const [inspectionUpdateId, setInspectionUpdateId] = useState<string | null>(null);
+  const [inspectionError, setInspectionError] = useState<string | null>(null);
+  const isVerificationBypassed =
+    Boolean(customerProfile && !customerProfile.isVerified && developmentVerificationBypass);
+  const canAccessWorkspace =
+    Boolean(customerProfile?.isVerified || isVerificationBypassed);
+
+  const updateInspectionType = async (serviceId: string, inspectionType: "Red" | "Yellow" | "Green") => {
+    setInspectionUpdateId(serviceId);
+    setInspectionError(null);
+    try {
+      await updateCustomerInspectionType({ serviceId, inspectionType });
+      setShipments((current) => current.map((shipment) =>
+        shipment.id === serviceId ? { ...shipment, inspectionType } : shipment,
+      ));
+    } catch (updateError: unknown) {
+      setInspectionError(updateError instanceof Error ? updateError.message : "Unable to update the inspection channel.");
+    } finally {
+      setInspectionUpdateId(null);
+    }
+  };
 
   const retryCustomerProfile = () => {
     setProfileLoading(true);
@@ -540,7 +570,7 @@ export default function CustomerDashboardPage() {
   }, [profileRetryCount]);
 
   useEffect(() => {
-    if (profileLoading || !customerProfile?.isVerified) return;
+    if (profileLoading || !canAccessWorkspace) return;
     const controller = new AbortController();
     void readApiList("tax", "tax-records", mapTaxRecord, controller.signal)
       .then((records) => {
@@ -556,10 +586,10 @@ export default function CustomerDashboardPage() {
         );
       });
     return () => controller.abort();
-  }, [profileLoading, customerProfile?.isVerified]);
+  }, [profileLoading, canAccessWorkspace]);
 
   useEffect(() => {
-    if (profileLoading || !customerProfile?.isVerified) return;
+    if (profileLoading || !canAccessWorkspace) return;
     const controller = new AbortController();
     const run = async () => {
       try {
@@ -583,7 +613,7 @@ export default function CustomerDashboardPage() {
     };
     void run();
     return () => controller.abort();
-  }, [activeView, applyViewData, profileLoading, customerProfile?.isVerified]);
+  }, [activeView, applyViewData, profileLoading, canAccessWorkspace]);
 
   const selectView = (view: ViewKey) => {
     if (view === activeView) {
@@ -648,7 +678,7 @@ export default function CustomerDashboardPage() {
             stage.requiresCustomerAction ? "Customer action required" : null,
           ].filter(Boolean).join(" · "),
           description: stage.description,
-          href: `/${lang}/customer/dashboard?view=shipments`,
+          href: `/${lang}/customer/services?view=shipments`,
         };
       });
     const unpaidTaxes = taxRecords
@@ -759,7 +789,8 @@ export default function CustomerDashboardPage() {
           </section>
         ) : profileError ? (
           <ErrorPanel message={profileError} onRetry={retryCustomerProfile} />
-        ) : !customerProfile?.isVerified ? (
+        ) : !customerProfile ||
+          (!customerProfile.isVerified && !developmentVerificationBypass) ? (
           <section className="rounded-2xl border border-amber-300 bg-amber-50 p-5 text-amber-950" role="alert">
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
@@ -789,11 +820,13 @@ export default function CustomerDashboardPage() {
                 </p>
                 <p className="mt-3 flex items-center gap-1.5 text-xs font-medium text-emerald-700">
                   <CheckCircle2 className="h-4 w-4" />
-                  Verified importer{customerProfile.tinNumber ? ` · TIN ${customerProfile.tinNumber}` : ""}
+                  {isVerificationBypassed
+                    ? "Development verification bypass active · profile not verified"
+                    : `Verified importer${customerProfile.tinNumber ? ` · TIN ${customerProfile.tinNumber}` : ""}`}
                 </p>
               </div>
               <Link
-                href={`/${lang}/component/request-service`}
+                href={`/${lang}/customer/services/new`}
                 className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800"
               >
                 <Plus className="h-4 w-4" />
@@ -822,7 +855,7 @@ export default function CustomerDashboardPage() {
                   </div>
                 </div>
                 <Link
-                  href={`/${lang}/customer/dashboard?view=shipments`}
+                  href={`/${lang}/customer/services?view=shipments`}
                   className="inline-flex items-center gap-1 text-xs font-semibold text-amber-900 hover:underline"
                 >
                   Review services <ArrowRight className="h-3.5 w-3.5" />
@@ -852,7 +885,7 @@ export default function CustomerDashboardPage() {
                     <h2 className="mt-1 text-lg font-bold text-slate-950">Active services</h2>
                   </div>
                   <Link
-                    href={`/${lang}/customer/dashboard?view=shipments`}
+                    href={`/${lang}/customer/services?view=shipments`}
                     className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 hover:text-blue-900"
                   >
                     View all <ArrowRight className="h-3.5 w-3.5" />
@@ -959,7 +992,7 @@ export default function CustomerDashboardPage() {
                     ) : null}
                     {actionItems.length > 4 && (
                       <Link
-                        href={`/${lang}/customer/dashboard?view=shipments`}
+                        href={`/${lang}/customer/services?view=shipments`}
                         className="inline-flex items-center gap-1 py-3 text-xs font-semibold text-blue-700 hover:text-blue-900"
                       >
                         View all updates <ArrowRight className="h-3.5 w-3.5" />
@@ -1027,6 +1060,11 @@ export default function CustomerDashboardPage() {
 
           <div className="space-y-4 p-4 sm:p-5">
             {currentError && <ErrorPanel message={currentError} onRetry={() => void loadView(activeView)} />}
+            {activeView === "shipments" && inspectionError && (
+              <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                {inspectionError}
+              </p>
+            )}
             {viewLoading ? <LoadingPanel /> : !currentError && activeView === "shipments" && (
               <div className="space-y-3">
                 {shipments.length === 0 ? <p className="rounded-lg bg-slate-50 p-5 text-sm text-slate-500">No shipments were returned for this account.</p> : shipments.map((shipment) => {
@@ -1038,9 +1076,36 @@ export default function CustomerDashboardPage() {
                     <article key={shipment.id} className="rounded-xl border border-slate-200 p-4">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div><h3 className="font-mono text-sm font-bold text-blue-800">{shipment.trackingNumber}</h3><p className="mt-1 text-sm text-slate-600">{shipment.origin} <span aria-hidden>→</span> {shipment.destination}</p></div>
-                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800">{shipment.status}</span>
+                        <div className="flex items-center gap-3">
+                          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800">{shipment.status}</span>
+                          <Link
+                            href={`/${lang}/customer/services/${encodeURIComponent(shipment.id)}`}
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 hover:text-blue-900"
+                          >
+                            Details <ArrowRight className="h-3.5 w-3.5" />
+                          </Link>
+                        </div>
                       </div>
                       <div className="mt-4 grid gap-2 text-xs text-slate-500 sm:grid-cols-2"><p>Mode: <span className="font-medium text-slate-800">{shipment.mode}</span></p><p>Assigned hub: <span className="font-medium text-slate-800">{shipment.assignedHub}</span></p></div>
+                      <label className="mt-4 block max-w-sm text-xs font-medium text-slate-600">
+                        Customs inspection channel
+                        <select
+                          value={shipment.inspectionType}
+                          disabled={inspectionUpdateId === shipment.id}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            if (value === "Red" || value === "Yellow" || value === "Green") {
+                              void updateInspectionType(shipment.id, value);
+                            }
+                          }}
+                          className="mt-1.5 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 disabled:opacity-60"
+                        >
+                          <option value="">Select channel</option>
+                          <option value="Red">Red</option>
+                          <option value="Yellow">Yellow</option>
+                          <option value="Green">Green</option>
+                        </select>
+                      </label>
                       {executionRows.some((stage) => stage.isBlocked || stage.requiresCustomerAction) && (
                         <div className="mt-4 space-y-2">
                           {executionRows

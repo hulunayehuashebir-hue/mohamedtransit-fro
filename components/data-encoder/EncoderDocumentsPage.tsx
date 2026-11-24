@@ -183,6 +183,7 @@ export default function EncoderDocumentsPage() {
 			try {
 				const response = await fetch("/api/encoder/services", {
 					cache: "no-store",
+					credentials: "include",
 					signal: controller.signal,
 				});
 				const body = await readServicesResponse(response);
@@ -213,7 +214,10 @@ export default function EncoderDocumentsPage() {
 	const handleRefresh = async () => {
 		setServicesError(null);
 		try {
-			const response = await fetch("/api/encoder/services", { cache: "no-store" });
+			const response = await fetch("/api/encoder/services", {
+				cache: "no-store",
+				credentials: "include",
+			});
 			const body = await readServicesResponse(response);
 			const nextServiceIds = readServiceIds(body);
 			setServiceIds(nextServiceIds);

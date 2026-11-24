@@ -37,19 +37,6 @@ interface DocumentStore extends DocumentFiltersState {
   addDocument: (doc: DocumentRecord) => void;
 }
 
-const initialDocuments: DocumentRecord[] = [
-  {
-    id: "doc-1",
-    name: "Proforma-Invoice-HAI-4417.pdf",
-    type: "Proforma Invoice",
-    serviceId: "SVC-2026-0417",
-    serviceStage: "Prepayment Invoice",
-    uploadedBy: "Selamawit Bekele",
-    uploadedAt: "18 Jun 2026, 12:14",
-    status: "Verified",
-  },
-];
-
 const asRecord = (value: unknown): Record<string, unknown> | null => {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -59,7 +46,7 @@ const asRecord = (value: unknown): Record<string, unknown> | null => {
 };
 
 export const useDocumentStore = create<DocumentStore>((set, get) => ({
-  documents: initialDocuments,
+  documents: [],
   searchQuery: "",
   statusFilter: "ALL",
   typeFilter: "ALL",
@@ -75,19 +62,21 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
         ? payload
         : asRecord(payload)?.items ??
           asRecord(payload)?.data ??
-          asRecord(payload)?.documents ??
-          initialDocuments;
+          asRecord(payload)?.documents;
+      if (!Array.isArray(list)) {
+        throw new Error("The document API response did not contain a document list.");
+      }
 
       set({
-        documents: Array.isArray(list) ? (list as DocumentRecord[]) : initialDocuments,
+        documents: list as DocumentRecord[],
         loading: false,
       });
     } catch (err: unknown) {
       set({
+        documents: [],
         error: err instanceof Error ? err.message : "Failed to load documents",
         loading: false,
       });
-      set({ documents: initialDocuments });
     }
   },
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -19,7 +19,11 @@ import {
   X,
 } from "lucide-react";
 import { useManagerStore } from "@/modules/manager/manager.store";
-import type { ManagerServiceDetail } from "@/modules/manager/manager.type";
+import type {
+  ManagerAssignedUserSummary,
+  ManagerExecutorAssignment,
+  ManagerRecentService,
+} from "@/modules/manager/manager.type";
 import DashboardOverview from "./dashboard-overview";
 
 const numberOrZero = (value: unknown): number => {
@@ -55,8 +59,10 @@ const serviceStatus = (value: unknown): string => {
     cancelled: "Cancelled",
     canceled: "Cancelled",
     delivered: "Delivered",
+    blocked: "Blocked",
+    requirescustomeraction: "Requires customer action",
   };
-  const normalizedStatus = typeof value === "string" ? value.toLowerCase().replace(/[\s_-]/g, "") : "";
+  const normalizedStatus = typeof value === "string" ? value.toLowerCase().replace(/[^a-z]/g, "") : "";
 
   return statusNames[normalizedStatus] ?? (typeof value === "string" && value.trim() ? value : "Status unavailable");
 };
@@ -72,9 +78,10 @@ const riskChannel = (value: unknown): { label: string; className: string } | nul
   if (channels[risk]) return channels[risk];
 
   const riskNames: Record<string, number> = { blue: 1, green: 2, yellow: 3, red: 4 };
-  const normalizedRisk = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const normalizedRisk = typeof value === "string" ? value.trim().toLowerCase().replace(/[^a-z]/g, "") : "";
 
-  return channels[riskNames[normalizedRisk]] ?? null;
+  const matchedRisk = Object.keys(riskNames).find((name) => normalizedRisk.includes(name));
+  return channels[riskNames[matchedRisk ?? normalizedRisk]] ?? null;
 };
 
 const timeAgo = (value: unknown, now: number | null): string => {
@@ -94,6 +101,64 @@ const timeAgo = (value: unknown, now: number | null): string => {
   return `${elapsedDays}d ago`;
 };
 
+const relativeActivityTime = (value: string, now: number | null): string => {
+  const parsedDate = Date.parse(value);
+  if (Number.isFinite(parsedDate)) return timeAgo(value, now);
+  return value || "Time unavailable";
+};
+
+const isTrue = (value: unknown): boolean =>
+  value === true || value === 1 || value === "1" || (typeof value === "string" && value.toLowerCase() === "true");
+
+const isTerminalStatus = (status: string): boolean =>
+  ["Completed", "Delivered", "Rejected", "Cancelled", "Draft"].includes(status);
+
+const isClearedStatus = (status: string): boolean =>
+  status === "Completed" || status === "Delivered";
+
+const getServiceCode = (service: ManagerRecentService): string => {
+  const value = readSafeText(service, [
+    "code",
+    "serviceCode",
+    "reference_number",
+    "referenceNumber",
+    "serviceNumber",
+    "trackingNumber",
+  ]);
+  if (
+    !value
+    || /^\d+$/.test(value)
+    || /^[0-9a-f]{16,}$/i.test(value)
+    || /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value)
+  ) {
+    return "Service reference unavailable";
+  }
+  return value;
+};
+
+const getServiceStatus = (service: ManagerRecentService): string => {
+  if (isTrue(service.isBlocked) || isTrue(service.IsBlocked)) return "Blocked";
+  if (isTrue(service.requiresCustomerAction) || isTrue(service.RequiresCustomerAction)) {
+    return "Requires customer action";
+  }
+  return serviceStatus(service.status);
+};
+
+const isWithinNext48Hours = (service: ManagerRecentService, now: number): boolean => {
+  const deadline = readSafeText(service, [
+    "dueAt",
+    "dueDate",
+    "slaDueAt",
+    "slaDeadline",
+    "SlaDeadline",
+    "eta",
+    "estimatedArrival",
+    "estimated_arrival",
+  ]);
+  const timestamp = Date.parse(deadline);
+  return Number.isFinite(timestamp) && timestamp >= now && timestamp <= now + 48 * 60 * 60 * 1000;
+};
+
 const reportMonth = (year: number, month: number): string =>
   new Date(year, month - 1).toLocaleDateString(undefined, { month: "short", year: "numeric" });
 
@@ -109,7 +174,7 @@ const readSafeText = (value: unknown, keys: string[]): string => {
   return "";
 };
 
-const personName = (person: ManagerServiceDetail["importer"]): string =>
+const personName = (person: ManagerAssignedUserSummary | null): string =>
   [person?.firstName, person?.lastName].filter(Boolean).join(" ") || person?.username || "Not assigned";
 
 const statusBadgeClass = (status: string): string => {
@@ -138,6 +203,7 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
   const {
     dashboardData,
     fetchDashboard,
+    fetchServices,
     loading,
     error,
     reportsAnalytics,
@@ -157,12 +223,47 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
   const lang = (params.lang as string) || "en";
   const [currentTime, setCurrentTime] = useState<number | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [activeShipments, setActiveShipments] = useState<ManagerExecutorAssignment[] | null>(null);
+  const [activeShipmentsLoading, setActiveShipmentsLoading] = useState(false);
+  const [activeShipmentsError, setActiveShipmentsError] = useState<string | null>(null);
+
+  const loadManagerShipments = useCallback(async () => {
+    if (!isManagerRoute) return;
+    setActiveShipmentsLoading(true);
+    setActiveShipmentsError(null);
+    try {
+      const allShipments: ManagerExecutorAssignment[] = [];
+      const pageSize = 100;
+      let page = 1;
+      let totalPages = 1;
+      do {
+        const pageShipments = await fetchServices({ page, pageSize });
+        if (pageShipments.length === 0 && useManagerStore.getState().error) {
+          throw new Error(useManagerStore.getState().error ?? "Unable to load shipment records.");
+        }
+        allShipments.push(...pageShipments);
+        totalPages = Math.max(1, useManagerStore.getState().servicePagination.totalPages);
+        page += 1;
+      } while (page <= totalPages);
+      const uniqueShipments = [...new Map(
+        allShipments.map((shipment) => [String(shipment.id), shipment]),
+      ).values()];
+      setActiveShipments(uniqueShipments);
+    } catch (loadError: unknown) {
+      setActiveShipments(null);
+      setActiveShipmentsError(loadError instanceof Error ? loadError.message : "Unable to load shipment records.");
+    } finally {
+      setActiveShipmentsLoading(false);
+    }
+  }, [fetchServices, isManagerRoute]);
 
   useEffect(() => {
     void fetchDashboard();
     if (isManagerRoute) void fetchReportsAnalytics();
     if (isManagerRoute) void fetchNotifications();
-  }, [fetchDashboard, fetchReportsAnalytics, fetchNotifications, isManagerRoute]);
+    const loadTimer = window.setTimeout(() => void loadManagerShipments(), 0);
+    return () => window.clearTimeout(loadTimer);
+  }, [fetchDashboard, fetchReportsAnalytics, fetchNotifications, isManagerRoute, loadManagerShipments]);
 
   useEffect(() => {
     if (!detailsOpen) return;
@@ -278,31 +379,65 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
   const latestMonthlyStats =
     dashboardData?.monthlyServiceStats[dashboardData.monthlyServiceStats.length - 1];
 
+  const managerShipments = activeShipments ?? [];
+  const queueSource: ManagerRecentService[] = isManagerRoute
+    ? managerShipments
+    : dashboardData?.recentServices ?? [];
+  const openCases = managerShipments.filter((shipment) => !isTerminalStatus(getServiceStatus(shipment))).length;
+  const needsAttention = managerShipments.filter((shipment) => {
+    const status = getServiceStatus(shipment);
+    const channel = riskChannel(shipment.risk_channel ?? shipment.riskLevel)?.label;
+    return !isTerminalStatus(status) && (
+      ["Blocked", "Needs review", "Requires customer action"].includes(status)
+      || channel === "Red channel"
+      || channel === "Yellow channel"
+    );
+  }).length;
+  const dueWithin48Hours = managerShipments.filter((shipment) =>
+    !isTerminalStatus(getServiceStatus(shipment)) && currentTime !== null && isWithinNext48Hours(shipment, currentTime),
+  ).length;
+  const nowDate = currentTime === null ? null : new Date(currentTime);
+  const clearedThisMonth = managerShipments.filter((shipment) => {
+    if (!isClearedStatus(getServiceStatus(shipment)) || !nowDate) return false;
+    const clearedDate = Date.parse(readSafeText(shipment, [
+      "completedAt",
+      "completionDate",
+      "deliveredAt",
+      "deliveryDate",
+      "clearanceDate",
+      "lastUpdateDate",
+      "updatedAt",
+    ]));
+    if (!Number.isFinite(clearedDate)) return false;
+    const date = new Date(clearedDate);
+    return date.getFullYear() === nowDate.getFullYear() && date.getMonth() === nowDate.getMonth();
+  }).length;
+
   const managerStats = [
     {
       title: "Open cases",
-      value: dashboardData?.openCases ?? "—",
+      value: activeShipments === null ? "—" : openCases.toLocaleString(),
       description: "",
       icon: <Layers className="h-4 w-4 text-slate-500" />,
       accent: "border-l-slate-300",
     },
     {
       title: "Needs attention",
-      value: dashboardData?.needsAttention ?? "—",
-      description: "",
+      value: activeShipments === null ? "—" : needsAttention.toLocaleString(),
+      description: "risk or review",
       icon: <AlertTriangle className="h-4 w-4 text-amber-600" />,
       accent: "border-l-amber-500",
     },
     {
       title: "Due within 48h",
-      value: dashboardData?.dueWithin48Hours ?? "—",
+      value: activeShipments === null || currentTime === null ? "—" : dueWithin48Hours.toLocaleString(),
       description: "",
       icon: <Clock3 className="h-4 w-4 text-slate-500" />,
       accent: "border-l-slate-300",
     },
     {
       title: "Cleared this month",
-      value: dashboardData?.clearedThisMonth ?? "—",
+      value: activeShipments === null ? "—" : clearedThisMonth.toLocaleString(),
       description: "",
       icon: <CheckCircle2 className="h-4 w-4 text-emerald-600" />,
       accent: "border-l-emerald-600",
@@ -322,53 +457,122 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
     { label: "Completed", count: completedServices, tone: "emerald" },
   ];
 
-  const queueItems = (dashboardData?.recentServices ?? [])
+  const queueItems = queueSource
     .map((service) => {
-      const lastUpdatedAt = Date.parse(service.lastUpdateDate ?? service.registeredDate ?? "");
-      const serviceId = service.serviceNumber || (service.id === undefined ? "" : String(service.id));
-      const status = service.isBlocked
-        ? "Blocked"
-        : service.requiresCustomerAction
-          ? "Requires customer action"
-          : serviceStatus(service.status);
-      const channel = riskChannel(service.riskLevel);
-      const riskPriority = channel
-        ? { "Red channel": 4, "Yellow channel": 3, "Green channel": 2, "Blue channel": 1 }[channel.label] ?? 0
-        : 0;
+      const updatedAt = readSafeText(service, ["lastUpdateDate", "updatedAt", "registeredDate", "createAt"]);
+      const lastUpdatedAt = Date.parse(updatedAt);
+      const stageStartedAt = readSafeText(service, [
+        "currentStageStartedAt",
+        "stageStartedAt",
+        "stageEnteredAt",
+        "lastUpdateDate",
+        "registeredDate",
+      ]);
+      const stageStartedTimestamp = Date.parse(stageStartedAt);
+      const code = getServiceCode(service);
+      const status = getServiceStatus(service);
+      const channel = riskChannel(service.risk_channel ?? service.riskLevel);
+      const priority = status === "Blocked" || channel?.label === "Red channel"
+        ? 0
+        : status === "Requires customer action" || status === "Needs review"
+          ? 1
+          : channel?.label === "Yellow channel"
+            ? 2
+            : status === "In progress"
+                && (channel?.label === "Green channel" || channel?.label === "Blue channel")
+              ? 3
+              : 4;
+      const origin = readSafeText(service, ["origin", "countryOfOrigin"]);
+      const transit = readSafeText(service, ["transitPort", "transit_port", "transitLocation"]);
+      const destination = readSafeText(service, ["destination"]);
+      const routeSummary = readSafeText(service, ["route_summary", "routeSummary"]);
+      const routeCategory = readSafeText(service, ["routeCategory"]);
+      const route = routeSummary || [origin, transit, destination].filter(Boolean).join(" → ");
 
       return {
         recordId: service.id,
-        id: serviceId,
-        title: String(service.itemDescription ?? ""),
-        importer: String(service.importerName ?? "Importer unavailable"),
-        route: String(
-          [service.origin, service.destination]
-            .filter((value) => typeof value === "string" && value.trim())
-            .join(" → ") ||
-          [service.countryOfOrigin, service.routeCategory]
-            .filter((value) => value !== null && value !== undefined && value !== "")
-            .join(" • ") ||
-          "No route details available"
-        ),
+        id: code,
+        title: readSafeText(service, ["cargo_description", "cargoDescription", "itemDescription", "description", "title"]),
+        importer: readSafeText(service, ["importerName", "businessName"])
+          || readSafeText(service.importer ?? {}, ["name", "businessName", "firstName"])
+          || "Importer unavailable",
+        route: route || routeCategory || "Route details unavailable",
         status,
         channel,
-        riskPriority,
-        attentionPriority: service.isBlocked || service.requiresCustomerAction ? 1 : 0,
+        priority,
+        stageStartedAt: Number.isFinite(stageStartedTimestamp) ? stageStartedTimestamp : Number.MAX_SAFE_INTEGER,
         lastUpdatedAt: Number.isFinite(lastUpdatedAt) ? lastUpdatedAt : 0,
-        updated: timeAgo(service.lastUpdateDate ?? service.registeredDate, currentTime),
+        updated: updatedAt ? timeAgo(updatedAt, currentTime) : "time unavailable",
       };
     })
     .filter((item) =>
       item.recordId !== undefined
-      && item.id
-      && !["Draft", "Completed", "Delivered", "Rejected", "Cancelled"].includes(item.status),
+      && !isTerminalStatus(item.status),
     )
     .sort((a, b) =>
-      b.attentionPriority - a.attentionPriority
-      || b.riskPriority - a.riskPriority
+      a.priority - b.priority
+      || a.stageStartedAt - b.stageStartedAt
       || a.lastUpdatedAt - b.lastUpdatedAt,
     )
     .slice(0, 5);
+
+  const derivedActivityItems = managerShipments
+    .map((shipment) => {
+      const status = getServiceStatus(shipment);
+      const channel = riskChannel(shipment.risk_channel ?? shipment.riskLevel);
+      const reference = getServiceCode(shipment);
+      const title = status === "Blocked"
+        ? `Blocked service · ${reference}`
+        : channel?.label === "Red channel"
+          ? `Red channel review · ${reference}`
+          : status === "Requires customer action"
+            ? `Importer action required · ${reference}`
+            : status === "Needs review"
+              ? `Case awaiting review · ${reference}`
+              : channel?.label === "Yellow channel"
+                ? `Yellow channel assigned · ${reference}`
+                : `Service status · ${reference}`;
+      const updatedAt = readSafeText(shipment, ["lastUpdateDate", "updatedAt", "registeredDate", "createAt"]);
+      if (!updatedAt || status === "Status unavailable") return null;
+      const cargo = readSafeText(shipment, ["cargo_description", "cargoDescription", "itemDescription", "description"]);
+      const importerName = readSafeText(shipment, ["importerName", "businessName"])
+        || readSafeText(shipment.importer ?? {}, ["name", "businessName"])
+        || "Importer unavailable";
+      const category = status === "Blocked" || channel?.label === "Red channel" || channel?.label === "Yellow channel"
+        ? "Risk"
+        : status === "Needs review" || status === "Requires customer action"
+          ? "Approvals"
+          : "Service Updates";
+      return {
+        id: `shipment-${String(shipment.id ?? reference)}`,
+        title,
+        description: [
+          `Current service status: ${status}.`,
+          cargo ? `Cargo: ${cargo}.` : "",
+          `Importer: ${importerName}.`,
+        ].filter(Boolean).join(" "),
+        category,
+        time: updatedAt ? timeAgo(updatedAt, currentTime) : "Time unavailable",
+        referenceId: "",
+        timestamp: Date.parse(updatedAt) || 0,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 6);
+  const activityItems = notifications.length
+    ? [...notifications]
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.time);
+        const rightTime = Date.parse(right.time);
+        return Number.isFinite(leftTime) && Number.isFinite(rightTime) ? rightTime - leftTime : 0;
+      })
+      .slice(0, 6)
+      .map((item) => ({
+        ...item,
+        time: relativeActivityTime(item.time, currentTime),
+      }))
+    : derivedActivityItems;
 
   const loadServiceDetails = async (id: number | string | undefined) => {
     if (id === undefined) return;
@@ -421,7 +625,7 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <p className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-slate-500">
-                Import Directorate
+                IMPORT DIRECTORATE
               </p>
 
               <h1 className="text-2xl font-semibold tracking-tight text-slate-950">
@@ -440,17 +644,19 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
                   onClick={() => {
                     void fetchDashboard();
                     void fetchNotifications();
+                    void fetchReportsAnalytics();
+                    void loadManagerShipments();
                   }}
-                  disabled={loading || notificationsLoading}
+                  disabled={loading || notificationsLoading || reportsLoading || activeShipmentsLoading}
                   className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <RefreshCw className={`h-4 w-4 ${loading || notificationsLoading ? "animate-spin" : ""}`} />
+                  <RefreshCw className={`h-4 w-4 ${loading || notificationsLoading || reportsLoading || activeShipmentsLoading ? "animate-spin" : ""}`} />
                   Refresh
                 </button>
               )}
               <Link
                 href={`/${lang}/admin/manager/services`}
-                className="inline-flex shrink-0 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50"
+                className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
               >
                 Open case register
                 <span aria-hidden="true">→</span>
@@ -468,6 +674,11 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
         {loading && !dashboardData && (
           <p role="status" className="rounded-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
             Loading manager dashboard...
+          </p>
+        )}
+        {isManagerRoute && activeShipmentsError && (
+          <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            Unable to calculate live case metrics: {activeShipmentsError}
           </p>
         )}
 
@@ -677,6 +888,14 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
                 </div>
               </>
             )}
+            <div className="flex justify-end border-t border-slate-100 pt-3">
+              <Link
+                href={`/${lang}/admin/manager/reports`}
+                className="text-xs font-semibold text-blue-700 hover:text-blue-900"
+              >
+                View full reports &amp; analytics <span aria-hidden="true">→</span>
+              </Link>
+            </div>
           </section>
         )}
 
@@ -701,7 +920,12 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-medium text-blue-700">{item.id}</span>
+                        <Link
+                          href={`/${lang}/admin/manager/services/${encodeURIComponent(String(item.recordId))}`}
+                          className="text-xs font-medium text-blue-700 hover:text-blue-900"
+                        >
+                          {item.id}
+                        </Link>
                         <span className={`inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 text-[11px] font-medium ${statusBadgeClass(item.status)}`}>
                           <StatusIcon status={item.status} />
                           {item.status}
@@ -731,7 +955,7 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
                       </div>
                     </div>
 
-                    <h3 className="mt-2 text-sm font-medium leading-5 text-slate-900">{item.title || "Description unavailable"}</h3>
+                    <h3 className="mt-2 text-sm font-medium leading-5 text-slate-900">{item.title || "Cargo description unavailable"}</h3>
                     <p className="mt-1 text-xs leading-4 text-slate-500">
                       {item.importer} <span className="text-slate-300">·</span> {item.route}
                     </p>
@@ -739,7 +963,11 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
                 ))
               ) : (
                 <p className="px-4 py-8 text-center text-sm text-slate-500">
-                  No recent services returned by the API.
+                  {activeShipmentsLoading
+                    ? "Loading live service records..."
+                    : activeShipmentsError
+                      ? "Live service records could not be loaded."
+                      : "No active service records are available."}
                 </p>
               )}
             </div>
@@ -767,8 +995,8 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
             )}
 
             <div className="divide-y divide-slate-100">
-              {notifications.length ? (
-              notifications.slice(0, 6).map((item) => (
+              {activityItems.length ? (
+              activityItems.map((item) => (
                   <div
                   key={item.id}
                     className="px-3 py-3"
@@ -783,7 +1011,11 @@ export default function ManagerDashboard({ isManagerRoute = false }: ManagerDash
               ))
               ) : (
               <p className="px-4 py-8 text-center text-xs text-slate-500">
-                {notificationsLoading ? "Loading notifications..." : "No notifications returned by the API."}
+                {notificationsLoading || activeShipmentsLoading
+                  ? "Loading recent operations..."
+                  : notificationsError
+                    ? "No notification or shipment activity is currently available."
+                    : "No recent operation events are available."}
               </p>
               )}
             </div>

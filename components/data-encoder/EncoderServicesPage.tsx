@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
 	ArrowDownUp,
 	AlertCircle,
@@ -15,6 +17,7 @@ import {
 } from "lucide-react";
 import EncoderSectionLayout from "@/components/data-encoder/EncoderSectionLayout";
 import { DataEncoderEndpoints } from "@/modules/dataencoder/data-encoder.endpoint";
+import { normalizeEncoderServiceMode } from "@/modules/dataencoder/service-mode";
 
 type ServiceRecord = Record<string, unknown>;
 
@@ -60,6 +63,14 @@ const findValue = (record: ServiceRecord, ...names: string[]): unknown => {
 		names.some((name) => candidate.toLowerCase() === name.toLowerCase()),
 	);
 	return key ? record[key] : undefined;
+};
+
+const findPreferredValue = (record: ServiceRecord, ...names: string[]): unknown => {
+	for (const name of names) {
+		const key = Object.keys(record).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+		if (key && record[key] !== undefined && record[key] !== null && record[key] !== "") return record[key];
+	}
+	return undefined;
 };
 
 const readText = (...values: unknown[]): string => {
@@ -249,22 +260,43 @@ const toDisplayService = (record: ServiceRecord): DisplayService => {
 	const importerNote = readNoteField(notes, "Importer");
 	const noteTin = importerNote.match(/\(TIN:\s*([^)]+)\)/i)?.[1]?.trim() ?? "";
 	const noteImporterName = importerNote.replace(/\s*\(TIN:.*\)$/i, "").trim();
-	const rawModeValue = findValue(record, "serviceType", "mode", "transportMode");
-	const rawMode = readText(rawModeValue, readNoteField(notes, "Service type"));
+	const rawModeValue = findValue(
+		record,
+		"serviceType",
+		"serviceTypeName",
+		"serviceTypeId",
+		"mode",
+		"transportMode",
+		"transportModeName",
+		"transportModeId",
+	);
+	const rawMode = readRelatedText(rawModeValue, "name", "label", "mode", "serviceType", "value", "code", "id") ||
+		readNoteField(notes, "Service type");
 	const rawStatus = findValue(record, "status", "serviceStatus", "approvalStatus", "recordStatus");
 	const rawRisk = findValue(record, "riskLevel", "riskChannel", "channel", "risk", "channelType");
 	const rawUpdated = readText(findValue(record, "updatedAt", "lastUpdated", "modifiedDate", "lastUpdateDate", "createAt", "createdAt"));
 	const rawEta = readText(findValue(record, "eta", "estimatedArrival", "expectedArrivalDate", "estimatedArrivalDate"));
 	const updatedTimestamp = rawUpdated ? Date.parse(rawUpdated) : 0;
+	const databaseId = readText(findValue(record, "serviceId", "id"));
+	const serviceReference = readText(
+		findPreferredValue(record, "trackingNumber", "serviceNumber", "serviceReference", "serviceCode", "referenceNumber", "reference"),
+	);
+	const mode = normalizeEncoderServiceMode(rawModeValue) || normalizeEncoderServiceMode(rawMode);
 
 	return {
-		id: readText(
-			findValue(record, "trackingNumber", "serviceNumber", "serviceReference", "referenceNumber", "reference"),
-			findValue(record, "serviceId", "id"),
-		) || "—",
-		databaseId: readText(findValue(record, "serviceId", "id")),
+		id: serviceReference || databaseId || "—",
+		databaseId,
 		description: readText(
-			findValue(record, "description", "itemDescription", "serviceDescription", "goodsDescription"),
+			findValue(
+				record,
+				"description",
+				"itemDescription",
+				"itemName",
+				"commodity",
+				"commodityName",
+				"serviceDescription",
+				"goodsDescription",
+			),
 			readNoteField(notes, "Goods description"),
 		),
 		importer:
@@ -276,12 +308,7 @@ const toDisplayService = (record: ServiceRecord): DisplayService => {
 			findValue(record, "customerReference", "customerCode", "tinNumber", "tin", "importerTin", "importerTIN"),
 			noteTin,
 		),
-		mode:
-			rawModeValue === 1 || rawMode === "1" || rawMode.toLowerCase().includes("multi")
-				? "Multimodal"
-				: rawModeValue === 2 || rawMode === "2" || rawMode.toLowerCase().includes("uni")
-					? "Unimodal"
-					: rawMode || "—",
+		mode: mode || rawMode || "—",
 		status: normalizeServiceStatus(rawStatus),
 		risk: rawRisk === undefined || rawRisk === null || rawRisk === ""
 			? "Unassigned"
@@ -302,6 +329,11 @@ const readRequestError = (error: unknown): string =>
 			: "Unable to load services.";
 
 export default function EncoderServicesPage() {
+	const pathname = usePathname();
+	const locale = pathname.split("/")[1];
+	const serviceRoute = /^\/(?:en|am)\/admin\/data-encoder(?:\/|$)/.test(pathname)
+		? `/${locale}/admin/data-encoder/services`
+		: "/encoder/services";
 	const [query, setQuery] = useState("");
 	const [statusFilter, setStatusFilter] = useState("");
 	const [modeFilter, setModeFilter] = useState("");
@@ -370,7 +402,7 @@ export default function EncoderServicesPage() {
 		const target = query.trim().toLowerCase();
 		return services.filter((service) => {
 			const matchesQuery = !target ||
-				`${service.id} ${service.databaseId} ${service.importer} ${service.customerReference} ${service.caseOwner}`
+				`${service.id} ${service.databaseId} ${service.description} ${service.importer} ${service.customerReference} ${service.mode} ${service.status} ${service.risk} ${service.caseOwner}`
 					.toLowerCase()
 					.includes(target);
 			return matchesQuery &&
@@ -561,20 +593,24 @@ export default function EncoderServicesPage() {
 						<tbody>
 							{sortedServices.map((service) => (
 								<tr key={`${service.id}-${service.customerReference}`} className="group border-t border-slate-200 bg-white hover:bg-slate-50/80">
-									<td className="sticky left-0 z-[1] bg-white px-4 py-4 align-middle group-hover:bg-slate-50/80 sm:px-5">
-										<p className="max-w-full truncate font-mono text-[12px] font-semibold text-blue-800" title={service.id}>{service.id}</p>
-										{service.description && <p className="mt-1 max-w-[250px] truncate text-xs text-slate-500" title={service.description}>{service.description}</p>}
+									<td className="sticky left-0 z-[1] overflow-hidden bg-white px-4 py-4 align-middle group-hover:bg-slate-50/80 sm:px-5">
+										{Number.isSafeInteger(Number(service.databaseId)) && Number(service.databaseId) > 0 ? (
+											<Link href={`${serviceRoute}/${encodeURIComponent(service.databaseId)}`} className="block w-full truncate font-mono text-[12px] font-semibold text-blue-800 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" title={`Open ${service.id}`}>{service.id}</Link>
+										) : (
+											<p className="block w-full truncate font-mono text-[12px] font-semibold text-blue-800" title={service.id}>{service.id}</p>
+										)}
+										{service.description && <p className="mt-1 block max-w-full truncate text-xs text-slate-500" title={service.description}>{service.description}</p>}
 									</td>
 									{visibleColumns.importer && <td className="px-5 py-4 align-middle">
 										<div className="min-w-0">
 											<p className="max-w-full truncate text-sm text-slate-700" title={service.importer}>{service.importer}</p>
-											{service.customerReference && <p className="text-xs text-slate-500">{service.customerReference}</p>}
+											{service.customerReference && <p className="max-w-full truncate text-xs text-slate-500" title={service.customerReference}>{service.customerReference}</p>}
 										</div>
 									</td>}
 									{visibleColumns.mode && <td className="px-4 py-4 sm:px-5">
 										{service.mode === "—"
 											? <span className="text-sm text-slate-400">—</span>
-											: <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 ring-1 ring-inset ring-blue-100">{service.mode}</span>}
+											: <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${service.mode === "Multimodal" ? "bg-indigo-50 text-indigo-700 ring-indigo-100" : service.mode === "Unimodal" ? "bg-cyan-50 text-cyan-800 ring-cyan-100" : "bg-slate-100 text-slate-700 ring-slate-200"}`}>{service.mode}</span>}
 									</td>}
 									{visibleColumns.status && <td className="px-5 py-4">
 										{service.status === "—"

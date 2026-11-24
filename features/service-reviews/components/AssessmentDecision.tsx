@@ -12,10 +12,10 @@ import type {
 import { useAuditStore } from "@/features/audit-logs/audit-logs-store";
 
 const EMPTY_SERVICE_STAGES: AssessorServiceStage[] = [];
-const ASSESSMENT_DECISIONS: RecordAssessmentDecision[] = [
-  "Approved",
-  "Rejected",
-  "Requires customer action",
+const ASSESSMENT_DECISIONS: Array<{ value: RecordAssessmentDecision; label: string }> = [
+  { value: "Approved", label: "Approved" },
+  { value: "Requires customer action", label: "Requires inspection / query" },
+  { value: "Rejected", label: "Rejected" },
 ];
 
 const getRequestErrorMessage = (error: unknown, fallback: string): string => {
@@ -26,11 +26,15 @@ const getRequestErrorMessage = (error: unknown, fallback: string): string => {
 
 export function AssessmentDecision({
   shipmentId,
+  stageId,
   serviceStatus,
+  assessmentEnabled = true,
   showDiscussion = true,
 }: {
   shipmentId?: number;
+  stageId?: number;
   serviceStatus?: string;
+  assessmentEnabled?: boolean;
   showDiscussion?: boolean;
 }) {
   const [note, setNote] = useState("");
@@ -88,6 +92,11 @@ export function AssessmentDecision({
     ? `${shipmentId}:${selectedStageId}`
     : "";
   const stageDiscussions = discussionKey ? stageDiscussionsByKey[discussionKey] ?? [] : [];
+  const taxAmountValue = Number(assessmentTaxAmount);
+  const dutyAmountValue = Number(assessmentDutyAmount);
+  const totalPayable = Number.isFinite(taxAmountValue) && Number.isFinite(dutyAmountValue)
+    ? taxAmountValue + dutyAmountValue
+    : null;
 
   const submitAssessment = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -128,6 +137,7 @@ export function AssessmentDecision({
     try {
       await recordAssessment({
         serviceId: shipmentId,
+        ...(stageId !== undefined ? { stageId } : {}),
         decision: assessmentDecision,
         taxAmount,
         dutyAmount,
@@ -344,18 +354,19 @@ export function AssessmentDecision({
           Decision <span className="text-red-600">*</span>
           <select
             required
+            disabled={!assessmentEnabled}
             value={assessmentDecision}
             onChange={(event) => {
               const selectedDecision = ASSESSMENT_DECISIONS.find(
-                (decision) => decision === event.target.value,
+                (decision) => decision.value === event.target.value,
               );
-              setAssessmentDecision(selectedDecision ?? "");
+              setAssessmentDecision(selectedDecision?.value ?? "");
             }}
             className="mt-1 h-10 w-full rounded border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
           >
             <option value="">Select an assessment decision</option>
-            {ASSESSMENT_DECISIONS.map((decision) => (
-              <option key={decision} value={decision}>{decision}</option>
+            {ASSESSMENT_DECISIONS.map(({ value, label }) => (
+              <option key={value} value={value}>{label}</option>
             ))}
           </select>
         </label>
@@ -364,6 +375,7 @@ export function AssessmentDecision({
             Tax amount <span className="text-red-600">*</span>
             <input
               required
+              disabled={!assessmentEnabled}
               type="number"
               min="0"
               step="0.01"
@@ -377,6 +389,7 @@ export function AssessmentDecision({
             Duty amount <span className="text-red-600">*</span>
             <input
               required
+              disabled={!assessmentEnabled}
               type="number"
               min="0"
               step="0.01"
@@ -387,14 +400,24 @@ export function AssessmentDecision({
             />
           </label>
         </div>
+        {totalPayable !== null && assessmentTaxAmount.trim() && assessmentDutyAmount.trim() && (
+          <p className="text-xs font-semibold text-slate-700">
+            Total payable: {new Intl.NumberFormat("en-ET", {
+              style: "currency",
+              currency: "ETB",
+              minimumFractionDigits: 2,
+            }).format(totalPayable)}
+          </p>
+        )}
         <label className="block text-xs font-medium text-slate-700">
           Notes <span className="font-normal text-slate-500">(optional)</span>
           <textarea
+            disabled={!assessmentEnabled}
             maxLength={2000}
             rows={3}
             value={assessmentNotes}
             onChange={(event) => setAssessmentNotes(event.target.value)}
-            placeholder="Add supporting assessment notes."
+            placeholder="Documentary findings, approval basis, or required reason for rejection."
             className="mt-1 w-full resize-y rounded border border-slate-200 bg-white p-3 text-sm font-normal text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
           />
         </label>
@@ -410,6 +433,7 @@ export function AssessmentDecision({
           <button
             type="submit"
             disabled={
+              !assessmentEnabled ||
               !shipmentId ||
               recordingAssessmentServiceId !== null ||
               !assessmentDecision.trim() ||
@@ -424,6 +448,11 @@ export function AssessmentDecision({
               : "Record assessment"}
           </button>
         </div>
+        {!assessmentEnabled && (
+          <p role="status" className="text-xs text-amber-700">
+            Assessment submission is available when the service has a recorded workflow stage.
+          </p>
+        )}
       </form>
 
       <div>

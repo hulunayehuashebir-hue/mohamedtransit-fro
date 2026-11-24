@@ -4,6 +4,7 @@ import {
 	useCallback,
 	useEffect,
 	useMemo,
+	useRef,
 	useState,
 	type FormEvent,
 } from "react";
@@ -20,8 +21,13 @@ import {
 } from "lucide-react";
 
 import EncoderSectionLayout from "@/components/data-encoder/EncoderSectionLayout";
-import { DataEncoderEndpoints } from "@/modules/dataencoder/data-encoder.endpoint";
+import {
+	DataEncoderEndpoints,
+	normalizeCustomerCreatePayload,
+	type CustomerAccountOption,
+} from "@/modules/dataencoder/data-encoder.endpoint";
 import useAuthStore from "@/modules/auth/auth.store";
+import { useRolesStore } from "@/modules/roles/roles.store";
 
 type CustomerRow = {
 	id: string;
@@ -129,35 +135,91 @@ const getResponseError = (
 			: fallback;
 	}
 
-	for (const key of [
-		"message",
-		"detail",
-		"error",
-		"title",
-	]) {
-		const message = body[key];
-
-		if (
-			typeof message === "string" &&
-			message.trim()
-		) {
-			return message;
-		}
-	}
-
-	if (Array.isArray(body.errors)) {
-		const messages = body.errors.filter(
-			(value): value is string =>
-				typeof value === "string" &&
-				Boolean(value.trim()),
+	const messages = ["message", "detail", "error", "title"]
+		.flatMap((key) => {
+			const value = body[key];
+			return typeof value === "string" && value.trim() ? [value.trim()] : [];
+		});
+	const errors = body.errors;
+	if (Array.isArray(errors)) {
+		messages.push(
+			...errors.flatMap((value) =>
+				typeof value === "string" && value.trim() ? [value.trim()] : [],
+			),
 		);
-
-		if (messages.length > 0) {
-			return messages.join("; ");
+	} else if (isRecord(errors)) {
+		for (const [field, value] of Object.entries(errors)) {
+			const details = Array.isArray(value) ? value : [value];
+			for (const detail of details) {
+				if (typeof detail === "string" && detail.trim()) {
+					messages.push(`${field}: ${detail.trim()}`);
+				}
+			}
 		}
 	}
 
-	return fallback;
+	return [...new Set(messages)].join("; ") || fallback;
+};
+
+const readCreatedUserId = (value: unknown, depth = 0): string | null => {
+	if (depth > 8) return null;
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const id = readCreatedUserId(item, depth + 1);
+			if (id) return id;
+		}
+		return null;
+	}
+	if (typeof value === "number" || typeof value === "string") {
+		const normalizedId = String(value).trim();
+		return /^[1-9]\d*$/.test(normalizedId) &&
+			Number.isSafeInteger(Number(normalizedId))
+			? normalizedId
+			: null;
+	}
+	if (!isRecord(value)) return null;
+
+	const id = readCreatedUserId(findValue(value, "userId", "id"), depth + 1);
+	if (id) return id;
+
+	for (const key of ["data", "payload", "response", "result", "user", "account", "items", "users"]) {
+		const nested = findValue(value, key);
+		if (nested === undefined || nested === value) continue;
+		const nestedId = readCreatedUserId(nested, depth + 1);
+		if (nestedId) return nestedId;
+	}
+	return null;
+};
+
+const readCreatedCustomerId = (value: unknown, depth = 0): string | null => {
+	if (depth > 8 || !isRecord(value)) return null;
+	for (const key of ["customerId", "id"]) {
+		const candidate = findValue(value, key);
+		const normalized =
+			typeof candidate === "number" || typeof candidate === "string"
+				? String(candidate).trim()
+				: "";
+		if (/^[1-9]\d*$/.test(normalized) && Number.isSafeInteger(Number(normalized))) {
+			return normalized;
+		}
+	}
+	for (const key of ["data", "payload", "response", "result", "customer", "record"]) {
+		const nested = findValue(value, key);
+		const id = readCreatedCustomerId(nested, depth + 1);
+		if (id) return id;
+	}
+	return null;
+};
+
+const readResponseBody = async (response: Response): Promise<unknown> => {
+	if (response.status === 204) return null;
+	const text = await response.text();
+	if (!text) return null;
+	try {
+		return JSON.parse(text) as unknown;
+	} catch {
+		return text;
+	}
 };
 
 const readCustomerId = (record: Record<string, unknown>): string =>
@@ -265,14 +327,37 @@ export default function EncoderCustomersPage({
 }: EncoderCustomersPageProps) {
 	const pathname = usePathname();
 	const router = useRouter();
-	const userId = useAuthStore((state) => state.user?.id);
+	const customerFormRef = useRef<HTMLFormElement>(null);
+	const roles = useRolesStore((state) => state.roles);
+	const fetchRoles = useRolesStore((state) => state.fetchRoles);
 	const [customers, setCustomers] = useState<CustomerRow[]>([]);
+	const [customerAccounts, setCustomerAccounts] = useState<CustomerAccountOption[]>([]);
+	const [customerAccountsLoading, setCustomerAccountsLoading] = useState(createPage);
+	const [customerAccountsError, setCustomerAccountsError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 	const [serviceDataError, setServiceDataError] = useState<string | null>(null);
 
 	const [submitting, setSubmitting] = useState(false);
 	const [submitError, setSubmitError] = useState<string | null>(null);
+	const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+	const [accountCreateOpen, setAccountCreateOpen] = useState(false);
+	const [accountCreating, setAccountCreating] = useState(false);
+	const [accountCreateError, setAccountCreateError] = useState<string | null>(null);
+	const [accountFieldErrors, setAccountFieldErrors] = useState<Record<string, string>>({});
+	const [selectedAccountId, setSelectedAccountId] = useState("");
+	const selectedAccountIsAvailable = customerAccounts.some(
+		(account) => account.id === selectedAccountId,
+	);
+	const [newAccount, setNewAccount] = useState({
+		firstName: "",
+		lastName: "",
+		username: "",
+		password: "",
+		email: "",
+		phone: "",
+	});
+	const [profilePhoto, setProfilePhoto] = useState<File | null>(null);
 	const [success, setSuccess] = useState<string | null>(null);
 
 	const [createOpen, setCreateOpen] = useState(createPage);
@@ -296,7 +381,144 @@ export default function EncoderCustomersPage({
 		router.replace(`/${locale}/auth/login?callbackUrl=${callbackUrl}`);
 	}, [router]);
 
-	const loadCustomers = useCallback(async () => {
+	const loadCustomerAccounts = useCallback(async (): Promise<CustomerAccountOption[]> => {
+		try {
+			const accounts = await DataEncoderEndpoints.getActiveCustomerAccounts();
+			setCustomerAccounts(accounts);
+			if (accounts.length === 0) setAccountCreateOpen(true);
+			return accounts;
+		} catch (accountsError: unknown) {
+			setCustomerAccounts([]);
+			setAccountCreateOpen(true);
+			setCustomerAccountsError(
+				accountsError instanceof Error
+					? accountsError.message
+					: "Unable to load active customer accounts.",
+			);
+			return [];
+		} finally {
+			setCustomerAccountsLoading(false);
+		}
+	}, []);
+
+	const createCustomerAccount = async () => {
+		setAccountCreateError(null);
+		setAccountFieldErrors({});
+		const accountErrors: Record<string, string> = {};
+		if (newAccount.firstName.trim().length < 2) accountErrors.firstName = "Enter a first name with at least 2 characters.";
+		if (newAccount.lastName.trim().length < 2) accountErrors.lastName = "Enter a last name with at least 2 characters.";
+		if (newAccount.username.trim().length < 3) accountErrors.username = "Enter a username with at least 3 characters.";
+		if (newAccount.password.length < 8) accountErrors.password = "Password must be at least 8 characters.";
+		const contactEmail = newAccount.email.trim();
+		const contactPhone = newAccount.phone.trim();
+		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
+			accountErrors.email = "Enter a valid email address.";
+		}
+		if (!contactPhone) accountErrors.phone = "Enter a contact phone number.";
+		if (!profilePhoto) accountErrors.profilePhoto = "Choose a profile photo.";
+		else if (!["image/jpeg", "image/png", "image/webp"].includes(profilePhoto.type)) {
+			accountErrors.profilePhoto = "Choose a JPG, PNG, or WEBP image.";
+		} else if (profilePhoto.size > 5 * 1024 * 1024) {
+			accountErrors.profilePhoto = "The image must be 5 MB or smaller.";
+		}
+		if (Object.keys(accountErrors).length) {
+			setAccountFieldErrors(accountErrors);
+			return;
+		}
+
+		const customerRole = roles.find((role) => role.roleName.trim().toLowerCase() === "importer")
+			?? roles.find((role) => role.roleName.trim().toLowerCase() === "customer");
+		if (!customerRole?.id) {
+			setAccountCreateError("The Customer or Importer role is unavailable. Refresh roles and try again.");
+			return;
+		}
+
+		const payload = new FormData();
+		payload.set("Username", newAccount.username.trim());
+		payload.set("FirstName", newAccount.firstName.trim());
+		payload.set("LastName", newAccount.lastName.trim());
+		payload.set("Email", contactEmail);
+		payload.set("Phone", contactPhone);
+		payload.set("Password", newAccount.password);
+		payload.set("IsSuperAdmin", "false");
+		payload.set("Roles", String(customerRole.id));
+		if (profilePhoto) payload.set("ProfileFile", profilePhoto, profilePhoto.name);
+
+		setAccountCreating(true);
+		try {
+			const response = await DataEncoderEndpoints.createCustomerAccount(payload);
+			const body = await readResponseBody(response);
+			if (response.status === 401 || response.status === 403) {
+				await redirectToLogin();
+				return;
+			}
+			if (!response.ok || (isRecord(body) && (body.error === true || body.isError === true))) {
+				throw new Error(getResponseError(body, `User creation failed (${response.status}).`));
+			}
+
+			const createdUserId = readCreatedUserId(body);
+			const accounts = await loadCustomerAccounts();
+			const createdAccount =
+				accounts.find((account) => account.email?.toLowerCase() === contactEmail.toLowerCase()) ??
+				(createdUserId
+					? {
+							id: createdUserId,
+							label: `${newAccount.firstName.trim()} ${newAccount.lastName.trim()} · ${contactEmail}`,
+							email: contactEmail,
+						}
+					: undefined);
+			if (createdAccount) {
+				const form = customerFormRef.current;
+				if (form) {
+					const contactValues: Record<string, string> = {
+						contactPerson: `${newAccount.firstName.trim()} ${newAccount.lastName.trim()}`,
+						contactPhone,
+						contactEmail,
+					};
+					for (const [name, value] of Object.entries(contactValues)) {
+						const field = form.elements.namedItem(name);
+						if (field instanceof HTMLInputElement) field.value = value;
+					}
+				}
+				setCustomerAccounts((current) =>
+					current.some((account) => account.id === createdAccount.id)
+						? current
+						: [...current, createdAccount],
+				);
+				setSelectedAccountId(createdAccount.id);
+				setAccountCreateOpen(false);
+				setAccountCreateError(null);
+				setNewAccount({
+					firstName: "",
+					lastName: "",
+					username: "",
+					password: "",
+					email: "",
+					phone: "",
+				});
+				setProfilePhoto(null);
+			} else {
+				setAccountCreateError("Account creation succeeded, but no user ID was returned and the account is not in the active Customer/Importer list. Refresh the list before creating the customer profile.");
+			}
+		} catch (createError: unknown) {
+			setAccountCreateError(
+				createError instanceof Error ? createError.message : "Unable to create the customer account.",
+			);
+		} finally {
+			setAccountCreating(false);
+		}
+	};
+
+	useEffect(() => {
+		if (!accountCreateOpen || roles.length) return;
+		void fetchRoles().catch((roleError: unknown) => {
+			setAccountCreateError(
+				roleError instanceof Error ? roleError.message : "Unable to load Customer/Importer roles.",
+			);
+		});
+	}, [accountCreateOpen, fetchRoles, roles.length]);
+
+	const loadCustomers = useCallback(async (): Promise<boolean> => {
 		setLoading(true);
 		setError(null);
 		setServiceDataError(null);
@@ -309,7 +531,7 @@ export default function EncoderCustomersPage({
 			const body: unknown = response.status === 204 ? [] : await response.json();
 			if (response.status === 401 || response.status === 403) {
 				await redirectToLogin();
-				return;
+				return false;
 			}
 			if (
 				!response.ok ||
@@ -408,9 +630,11 @@ export default function EncoderCustomersPage({
 					};
 				}),
 			);
+			return true;
 		} catch (loadError: unknown) {
 			setCustomers([]);
 			setError(loadError instanceof Error ? loadError.message : "Unable to load customers.");
+			return false;
 		} finally {
 			setLoading(false);
 		}
@@ -426,37 +650,78 @@ export default function EncoderCustomersPage({
 		event.preventDefault();
 
 		setSubmitError(null);
+		setFieldErrors({});
 		setSuccess(null);
 		setSubmitting(true);
 
 		const form = event.currentTarget;
 
-		const formData = new FormData(form);
-
-		const payload: Record<string, unknown> =
-			Object.fromEntries(formData.entries());
-		const numericUserId = Number(userId);
-		if (!Number.isSafeInteger(numericUserId) || numericUserId <= 0) {
-			setSubmitError("Your authenticated user ID is unavailable. Sign in again, then retry customer creation.");
+		if (!selectedAccountIsAvailable) {
+			setFieldErrors({
+				userId: "Select or create an active Customer/Importer account before creating this customer.",
+			});
 			setSubmitting(false);
 			return;
 		}
-		payload.userId = String(numericUserId);
+
+		const formData = new FormData(form);
+
+		let payload: Record<string, unknown>;
+		try {
+			payload = normalizeCustomerCreatePayload(
+				Object.fromEntries(formData.entries()),
+			);
+		} catch (payloadError: unknown) {
+			setSubmitError(
+				payloadError instanceof Error
+					? payloadError.message
+					: "Select a valid active customer account.",
+			);
+			setSubmitting(false);
+			return;
+		}
+
+		const invalidFields = Array.from(
+			form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+				"input, select, textarea",
+			),
+		).filter((field) => field.willValidate && !field.checkValidity());
+		if (invalidFields.length) {
+			const errors = Object.fromEntries(
+				invalidFields.map((field) => [field.name, field.validationMessage]),
+			);
+			console.warn("Customer form validation failed:", errors);
+			setFieldErrors(errors);
+			invalidFields[0]?.focus();
+			setSubmitting(false);
+			return;
+		}
 
 		/*
 		 * The expiry field is optional.
 		 * If the user leaves it empty, send null instead of "".
 		 */
-		if (
-			payload.importLicenseExpiry === "" ||
-			payload.importLicenseExpiry === undefined
-		) {
+		const expiry = payload.importLicenseExpiry;
+		if (typeof expiry === "string" && expiry.trim()) {
+			const expiryDate = new Date(expiry);
+			if (Number.isNaN(expiryDate.getTime())) {
+				const dateError = "Enter a valid import license expiry date.";
+				console.warn("Customer form validation failed:", { importLicenseExpiry: dateError });
+				setFieldErrors({ importLicenseExpiry: dateError });
+				setSubmitting(false);
+				return;
+			}
+			payload.importLicenseExpiry = expiryDate.toISOString();
+		} else {
 			payload.importLicenseExpiry = null;
+		}
+		for (const [key, value] of Object.entries(payload)) {
+			if (value === "") payload[key] = null;
 		}
 
 		try {
 			const response = await DataEncoderEndpoints.createCustomer(payload);
-			const body: unknown = response.status === 204 ? null : await response.json();
+			const body = await readResponseBody(response);
 			if (response.status === 401 || response.status === 403) {
 				await redirectToLogin();
 				return;
@@ -476,14 +741,39 @@ export default function EncoderCustomersPage({
 				);
 			}
 
+			const businessName = String(payload.businessName ?? "").trim();
+			const tinNumber = String(payload.tinNumber ?? "").trim();
+			const createdId = readCreatedCustomerId(body);
+			const createdCustomer: CustomerRow = {
+				id: createdId ?? `created-${String(payload.userId)}-${Date.now()}`,
+				businessName,
+				tinNumber,
+				businessLicense: String(payload.businessLicense ?? ""),
+				businessType: String(payload.businessType ?? ""),
+				contactPerson: String(payload.contactPerson ?? ""),
+				contactPhone: String(payload.contactPhone ?? ""),
+				contactEmail: String(payload.contactEmail ?? ""),
+				registeredAt: new Date().toISOString(),
+				activeCases: null,
+				kycStatus: "Pending",
+			};
+
 			form.reset();
-
-			setSuccess(
-				"Customer record created successfully.",
-			);
+			setFieldErrors({});
 			setSearch("");
-
-			await loadCustomers();
+			const refreshed = await loadCustomers();
+			setCustomers((current) => {
+				const alreadyListed = current.some((customer) =>
+					(createdId && customer.id === createdId) ||
+					(customer.tinNumber && customer.tinNumber.toLowerCase() === tinNumber.toLowerCase()),
+				);
+				return alreadyListed ? current : [createdCustomer, ...current];
+			});
+			setSuccess(
+				refreshed
+					? `${businessName} registered successfully${createdId ? ` (ID ${createdId})` : ""}.`
+					: `${businessName} was created${createdId ? ` (ID ${createdId})` : ""}, but the customer list could not be refreshed. The new record is shown below.`,
+			);
 
 			closeCreate();
 		} catch (createError: unknown) {
@@ -504,6 +794,14 @@ export default function EncoderCustomersPage({
 
 		return () => window.clearTimeout(timeoutId);
 	}, [closeCreate, loadCustomers]);
+
+	useEffect(() => {
+		if (!createOpen) return;
+		const timeoutId = window.setTimeout(() => {
+			void loadCustomerAccounts();
+		}, 0);
+		return () => window.clearTimeout(timeoutId);
+	}, [createOpen, loadCustomerAccounts]);
 
 	const filteredCustomers = useMemo(() => {
 		const query = search.trim().toLowerCase();
@@ -595,6 +893,8 @@ export default function EncoderCustomersPage({
 					type="button"
 					onClick={() => {
 						setSubmitError(null);
+						setCustomerAccountsError(null);
+						setCustomerAccountsLoading(true);
 						setCreateOpen(true);
 					}}
 					className="inline-flex shrink-0 items-center justify-center gap-2 rounded-md bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
@@ -888,7 +1188,25 @@ export default function EncoderCustomersPage({
 						</div>
 
 						<form
+							ref={customerFormRef}
 							onSubmit={createCustomer}
+							noValidate
+							onChange={(event) => {
+								const target = event.nativeEvent.target;
+								const fieldName =
+									target instanceof HTMLInputElement ||
+									target instanceof HTMLSelectElement ||
+									target instanceof HTMLTextAreaElement
+										? target.name
+										: "";
+								if (fieldName && fieldErrors[fieldName]) {
+									setFieldErrors((current) => {
+										const next = { ...current };
+										delete next[fieldName];
+										return next;
+									});
+								}
+							}}
 							className="space-y-5 p-5 sm:p-6"
 						>
 							{submitError && (
@@ -902,7 +1220,135 @@ export default function EncoderCustomersPage({
 
 							<section className="rounded-xl border border-slate-200 p-4 sm:p-5">
 								<div className="mb-4">
-									<h3 className="text-sm font-semibold text-slate-900">Business registration</h3>
+									<h3 className="text-sm font-semibold text-slate-900">1. Customer account</h3>
+									<p className="mt-1 text-xs text-slate-500">Select an existing login or create a new customer account.</p>
+								</div>
+								<div className="grid gap-4 sm:grid-cols-2">
+									<label className="block text-sm font-medium text-slate-700 sm:col-span-2">
+										Customer login account <span className="text-rose-600">*</span>
+										<select
+											name="userId"
+											value={selectedAccountId}
+											required
+											aria-invalid={Boolean(fieldErrors.userId)}
+											aria-describedby={fieldErrors.userId ? "userId-error" : "userId-help"}
+											onChange={(event) => setSelectedAccountId(event.target.value)}
+											disabled={customerAccountsLoading}
+											className="mt-1.5 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
+										>
+											<option value="">
+												{customerAccountsLoading
+													? "Loading active customer accounts…"
+													: customerAccounts.length
+														? "Select an active customer account"
+														: "No active customer accounts available"}
+											</option>
+											{customerAccounts.map((account) => (
+												<option key={account.id} value={account.id}>{account.label}</option>
+											))}
+										</select>
+										<span id="userId-help" className="mt-1 block text-xs text-slate-500">
+											Choose an existing account, or create a new one here. Its contact details will be added to the customer record.
+										</span>
+										{fieldErrors.userId && <span id="userId-error" role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors.userId}</span>}
+										{customerAccountsError && (
+											<span role="alert" className="mt-1 block text-xs text-rose-700">
+												{customerAccountsError}{" "}
+												<button type="button" onClick={() => {
+													setCustomerAccountsError(null);
+													setCustomerAccountsLoading(true);
+													void loadCustomerAccounts();
+												}} className="font-semibold underline">
+													Retry
+												</button>
+											</span>
+										)}
+									</label>
+										<div className="sm:col-span-2 -mt-3">
+											<button
+												type="button"
+												onClick={() => {
+													setAccountCreateOpen((open) => !open);
+													setAccountCreateError(null);
+													setAccountFieldErrors({});
+												}}
+												className="text-xs font-semibold text-blue-700 underline"
+											>
+												{accountCreateOpen ? "Cancel new account" : "＋ Create a new customer account"}
+											</button>
+										</div>
+										{accountCreateOpen && (
+											<div className="sm:col-span-2 rounded-md border border-slate-200 p-4">
+												<p className="mb-3 text-sm font-semibold text-slate-800">New customer account</p>
+												<p className="mb-4 text-xs text-slate-500">The account will be assigned the Customer or Importer role. All fields are required.</p>
+												<div className="grid gap-4 sm:grid-cols-2">
+													{([
+														["firstName", "First name", "text"],
+														["lastName", "Last name", "text"],
+														["username", "Username", "text"],
+														["email", "Email address", "email"],
+														["phone", "Phone number", "tel"],
+														["password", "Password", "password"],
+													] as const).map(([field, label, type]) => (
+														<label key={field} className="block text-sm font-medium text-slate-700">
+															{label} <span className="text-rose-600">*</span>
+															<input
+																value={newAccount[field]}
+																type={type}
+																autoComplete={field === "password" ? "new-password" : "off"}
+																onChange={(event) => {
+																	setNewAccount((current) => ({ ...current, [field]: event.target.value }));
+																	setAccountFieldErrors((current) => {
+																		const next = { ...current };
+																		delete next[field];
+																		return next;
+																	});
+																}}
+																aria-invalid={Boolean(accountFieldErrors[field])}
+																className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+															/>
+															{accountFieldErrors[field] && <span role="alert" className="mt-1 block text-xs text-rose-700">{accountFieldErrors[field]}</span>}
+														</label>
+													))}
+													<label className="block text-sm font-medium text-slate-700 sm:col-span-2">
+														Profile photo <span className="text-rose-600">*</span>
+														<input
+															type="file"
+															accept="image/jpeg,image/png,image/webp"
+															onChange={(event) => {
+																setProfilePhoto(event.target.files?.[0] ?? null);
+																setAccountFieldErrors((current) => {
+																	const next = { ...current };
+																	delete next.profilePhoto;
+																	return next;
+																});
+															}}
+															aria-invalid={Boolean(accountFieldErrors.profilePhoto)}
+															className="mt-1.5 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-blue-50 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-blue-700"
+														/>
+														<span className="mt-1 block text-xs font-normal text-slate-500">JPG, PNG, or WEBP; maximum 5 MB.</span>
+														{accountFieldErrors.profilePhoto && <span role="alert" className="mt-1 block text-xs text-rose-700">{accountFieldErrors.profilePhoto}</span>}
+													</label>
+													{accountCreateError && <p role="alert" className="text-xs text-rose-700 sm:col-span-2">{accountCreateError}</p>}
+													<div className="sm:col-span-2 flex justify-end">
+														<button
+															type="button"
+															onClick={() => void createCustomerAccount()}
+															disabled={accountCreating}
+															className="rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+														>
+															{accountCreating ? "Creating account…" : "Create and select account"}
+														</button>
+													</div>
+												</div>
+											</div>
+										)}
+								</div>
+							</section>
+
+							<section className="rounded-xl border border-slate-200 p-4 sm:p-5">
+								<div className="mb-4">
+									<h3 className="text-sm font-semibold text-slate-900">2. Business registration</h3>
 									<p className="mt-1 text-xs text-slate-500">Enter the importer’s registered business and license details.</p>
 								</div>
 								<div className="grid gap-4 sm:grid-cols-2">
@@ -920,8 +1366,11 @@ export default function EncoderCustomersPage({
 												type={type}
 												required
 												maxLength={160}
+												aria-invalid={Boolean(fieldErrors[name])}
+												aria-describedby={fieldErrors[name] ? `${name}-error` : undefined}
 												className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
 											/>
+											{fieldErrors[name] && <span id={`${name}-error`} role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors[name]}</span>}
 										</label>
 									))}
 									<label className="block text-sm font-medium text-slate-700">
@@ -929,8 +1378,11 @@ export default function EncoderCustomersPage({
 										<input
 											name="importLicenseExpiry"
 											type="date"
+											aria-invalid={Boolean(fieldErrors.importLicenseExpiry)}
+											aria-describedby={fieldErrors.importLicenseExpiry ? "importLicenseExpiry-error" : undefined}
 											className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
 										/>
+										{fieldErrors.importLicenseExpiry && <span id="importLicenseExpiry-error" role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors.importLicenseExpiry}</span>}
 									</label>
 								</div>
 							</section>
@@ -953,8 +1405,11 @@ export default function EncoderCustomersPage({
 												type={type}
 												required
 												maxLength={160}
+												aria-invalid={Boolean(fieldErrors[name])}
+												aria-describedby={fieldErrors[name] ? `${name}-error` : undefined}
 												className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
 											/>
+											{fieldErrors[name] && <span id={`${name}-error`} role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors[name]}</span>}
 										</label>
 									))}
 								</div>
@@ -978,8 +1433,11 @@ export default function EncoderCustomersPage({
 												type="text"
 												required
 												maxLength={160}
+												aria-invalid={Boolean(fieldErrors[name])}
+												aria-describedby={fieldErrors[name] ? `${name}-error` : undefined}
 												className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
 											/>
+											{fieldErrors[name] && <span id={`${name}-error`} role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors[name]}</span>}
 										</label>
 									))}
 									<label className="block text-sm font-medium text-slate-700 sm:col-span-3">
@@ -989,8 +1447,11 @@ export default function EncoderCustomersPage({
 											required
 											maxLength={500}
 											rows={3}
+											aria-invalid={Boolean(fieldErrors.businessAddress)}
+											aria-describedby={fieldErrors.businessAddress ? "businessAddress-error" : undefined}
 											className="mt-1.5 w-full rounded-md border border-slate-300 p-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
 										/>
+										{fieldErrors.businessAddress && <span id="businessAddress-error" role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors.businessAddress}</span>}
 									</label>
 								</div>
 							</section>
@@ -1009,12 +1470,14 @@ export default function EncoderCustomersPage({
 
 								<button
 									type="submit"
-									disabled={submitting}
+									disabled={submitting || customerAccountsLoading || !selectedAccountIsAvailable}
 									className="rounded-md bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
 								>
 									{submitting
 										? "Creating customer…"
-										: "Create customer"}
+										: !selectedAccountIsAvailable && !customerAccountsLoading
+											? "Select or create an account first"
+											: "Create customer"}
 								</button>
 							</div>
 						</form>

@@ -495,7 +495,7 @@ export const useServiceReviewStore = create<ServiceReviewStore>((set, get) => ({
           documentId: documentId || undefined,
           name: readText(
             readField(document, "fileName", "name", "documentName", "originalFileName"),
-            `Document ${index + 1}`,
+            "—",
           ),
           type: getDocumentType(document),
           source: "Service" as const,

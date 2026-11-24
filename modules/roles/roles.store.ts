@@ -13,7 +13,6 @@ import {
 import type {
   CreateRolePrivilegeRequest,
   RoleDto,
-  RoleListParams,
   RolePrivilegeDto,
 } from "./roles.types";
 
@@ -23,7 +22,7 @@ interface RolesState {
   selectedRole: RoleDto | null;
   loading: boolean;
   error: string | null;
-  fetchRoles: (params?: RoleListParams) => Promise<void>;
+  fetchRoles: () => Promise<void>;
   fetchRoleById: (id: string | number) => Promise<RoleDto | null>;
   fetchRolePrivileges: () => Promise<RolePrivilegeDto[]>;
   assignRolePrivileges: (payload: CreateRolePrivilegeRequest) => Promise<unknown>;
@@ -36,43 +35,86 @@ interface RolesState {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const readField = (value: Record<string, unknown>, ...names: string[]): unknown => {
+  const key = Object.keys(value).find((candidate) =>
+    names.some((name) => candidate.toLowerCase() === name.toLowerCase()),
+  );
+  return key === undefined ? undefined : value[key];
+};
+
 const toRole = (value: unknown): RoleDto | null => {
-  if (!isRecord(value) || typeof value.roleName !== "string") {
-    return null;
-  }
+  if (!isRecord(value)) return null;
+
+  const roleName = readField(value, "roleName", "name", "displayName");
+  if (typeof roleName !== "string" || !roleName.trim()) return null;
+
+  const rawId = readField(value, "id", "roleId");
+  const id = typeof rawId === "number"
+    ? rawId
+    : typeof rawId === "string" && /^\d+$/.test(rawId.trim())
+      ? Number(rawId)
+      : undefined;
+  if (id === undefined || !Number.isSafeInteger(id) || id <= 0) return null;
+
+  const rawPrivileges = readField(value, "privileges");
 
   return {
     ...value,
-    id: typeof value.id === "number" ? value.id : undefined,
-    roleName: value.roleName,
-    privileges: Array.isArray(value.privileges) ? value.privileges : [],
-  } as RoleDto;
+    id,
+    roleName: roleName.trim(),
+    privileges: Array.isArray(rawPrivileges) ? rawPrivileges : [],
+  };
 };
 
-const extractRoles = (value: unknown): RoleDto[] => {
+const extractRoles = (value: unknown, depth = 0): RoleDto[] => {
+  if (depth > 8) return [];
+
   if (Array.isArray(value)) {
-    return value.map(toRole).filter((role): role is RoleDto => role !== null);
+    return value.flatMap((item) => {
+      const role = toRole(item);
+      return role ? [role] : extractRoles(item, depth + 1);
+    });
   }
 
   if (!isRecord(value)) {
     return [];
   }
 
-  for (const key of ["data", "payload", "items", "roles", "result"]) {
-    const nested = value[key];
-    const nestedRoles = Array.isArray(nested) ? extractRoles(nested) : [];
-    if (nestedRoles.length > 0) {
-      return nestedRoles;
-    }
+  const role = toRole(value);
+  if (role) return [role];
 
-    const nestedRole = Array.isArray(nested) ? null : toRole(nested);
-    if (nestedRole) {
-      return [nestedRole];
-    }
+  const nestedKeys = [
+    "data",
+    "payload",
+    "response",
+    "items",
+    "roles",
+    "roleList",
+    "roleDtos",
+    "records",
+    "result",
+    "$values",
+  ];
+  const nestedValues: unknown[] = nestedKeys.flatMap((key) => {
+    const nested = readField(value, key);
+    return nested === undefined || nested === value ? [] : [nested];
+  });
+  const knownKeys = new Set(nestedKeys.map((key) => key.toLowerCase()));
+  nestedValues.push(
+    ...Object.entries(value)
+      .filter(([key, nested]) =>
+        !knownKeys.has(key.toLowerCase()) &&
+        (Array.isArray(nested) || isRecord(nested)),
+      )
+      .map(([, nested]) => nested),
+  );
+
+  for (const nested of nestedValues) {
+    const nestedRoles = extractRoles(nested, depth + 1);
+    if (nestedRoles.length > 0) return nestedRoles;
   }
 
-  const role = toRole(value);
-  return role ? [role] : [];
+  return [];
 };
 
 const getErrorMessage = (error: unknown, fallback: string) =>
@@ -132,11 +174,15 @@ export const useRolesStore = create<RolesState>((set) => ({
   loading: false,
   error: null,
 
-  fetchRoles: async (params) => {
+  fetchRoles: async () => {
     set({ loading: true, error: null });
     try {
-      const response = await getAllRoles(params);
-      set({ roles: extractRoles(response), loading: false });
+      const response = await getAllRoles();
+      const roles = extractRoles(response);
+      const uniqueRoles = [...new Map(
+        roles.map((role) => [role.id, role]),
+      ).values()];
+      set({ roles: uniqueRoles, loading: false });
     } catch (error: unknown) {
       set({ loading: false, error: getErrorMessage(error, "Failed to load roles.") });
       throw error;

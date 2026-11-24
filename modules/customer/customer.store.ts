@@ -28,15 +28,15 @@ const statusMap: Record<number, string> = {
 
 const normalizeCustomerService = (item: CustomerServiceApiItem): CustomerCreatedServiceRecord => ({
   id: item.id,
-  trackingNumber: item.serviceNumber || `SR-${item.id}`,
-  importerId: item.customerId || 0,
-  description: item.itemDescription || "Import service",
+  trackingNumber: item.serviceNumber,
+  importerId: item.customerId,
+  description: item.itemDescription,
   mode: item.serviceType === 0 ? "Road" : item.serviceType === 1 ? "Sea" : "Air",
   assignedHub: item.routeCategory || "-",
-  status: statusMap[item.status] || "Pending",
-  origin: item.countryOfOrigin || "-",
-  destination: item.routeCategory || "-",
-  createAt: item.registeredDate || new Date().toISOString(),
+  status: statusMap[item.status] ?? String(item.status),
+  origin: item.countryOfOrigin,
+  destination: item.destination ?? "",
+  createAt: item.registeredDate,
 });
 
 interface CustomerServiceState {
@@ -47,7 +47,7 @@ interface CustomerServiceState {
   error: string | null;
   registerCustomer: (payload: CustomerRegisterPayload) => Promise<CustomerRegistrationRecord | null>;
   getCustomerProfile: () => Promise<CustomerProfileRecord | null>;
-  createService: (payload: CustomerCreateServicePayload) => Promise<CustomerCreatedServiceRecord | null>;
+  createService: (payload: CustomerCreateServicePayload) => Promise<boolean>;
   getMyServices: () => Promise<CustomerCreatedServiceRecord[]>;
   setServices: (services: CustomerCreatedServiceRecord[]) => void;
 }
@@ -133,28 +133,13 @@ export const useCustomerServiceStore = create<CustomerServiceState>((set) => ({
     set({ loading: true, error: null });
 
     try {
-      const response = await createCustomerService(payload);
-      const candidate = (response as { data?: CustomerCreatedServiceRecord } | CustomerCreatedServiceRecord | undefined) ?? null;
-      const normalized: CustomerCreatedServiceRecord | null =
-        candidate && typeof candidate === "object" && "data" in candidate && candidate.data ? candidate.data :
-        candidate && typeof candidate === "object" ? candidate as CustomerCreatedServiceRecord : null;
-
-      if (!normalized) {
-        set({ loading: false, error: "No service returned from API." });
-        return null;
-      }
-
-      set((state) => ({
-        services: [normalized, ...state.services.filter((item) => item.id !== normalized.id)],
-        loading: false,
-        error: null,
-      }));
-
-      return normalized;
+      await createCustomerService(payload);
+      set({ loading: false, error: null });
+      return true;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unable to create service.";
       set({ loading: false, error: message });
-      return null;
+      return false;
     }
   },
 }));

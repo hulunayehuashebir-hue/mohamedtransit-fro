@@ -18,7 +18,7 @@ const columnOptions: Array<{ key: ServiceColumn; label: string }> = [
 ];
 
 const exportColumns: Array<{ label: string; value: (service: ServiceRecord) => string }> = [
-  { label: "Service", value: (service) => service.id },
+  { label: "Service", value: (service) => service.serviceCode ?? service.referenceNumber ?? "Service reference unavailable" },
   { label: "Reference", value: (service) => service.referenceNumber ?? "" },
   { label: "Title", value: (service) => service.title },
   { label: "Importer", value: (service) => service.importerName },

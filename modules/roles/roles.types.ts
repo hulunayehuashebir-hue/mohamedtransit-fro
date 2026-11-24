@@ -26,8 +26,4 @@ export interface CreateRolePrivilegeRequest {
   [key: string]: unknown;
 }
 
-export interface RoleListParams {
-  recordStatus?: string;
-}
-
 export type RoleResponse = RoleDto | RoleDto[] | Record<string, unknown>;

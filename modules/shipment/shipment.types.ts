@@ -9,6 +9,8 @@ export interface ShipmentServiceStageUpdatePayload {
   userId?: string | number | null;
   UserId?: string | number | null;
   status?: string | number | null;
+  riskLevel?: string | number | null;
+  riskChannel?: string | number | null;
   notes?: string | null;
   [key: string]: unknown;
 }

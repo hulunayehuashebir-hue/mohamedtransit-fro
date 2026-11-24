@@ -76,13 +76,13 @@ const groups = [
     label: "Overview",
     items: [
       ["Dashboard", "/customer/dashboard", LayoutDashboard],
-      ["My Services", "/customer/dashboard?view=shipments", PackageSearch],
-      ["Request New Service", "/component/request-service", Plus],
+      ["My Services", "/customer/services", PackageSearch],
+      ["Request New Service", "/customer/services/new", Plus],
     ],
   },
   {
     label: "Records",
-    items: [["Tax Information", "/customer/dashboard?view=tax-records", WalletCards], ["Documents", "/customer/dashboard?view=documents", FileText]],
+    items: [["Tax Information", "/customer/dashboard?view=tax-records", WalletCards], ["Documents", "/customer/documents", FileText]],
   },
   {
     label: "Communication",
@@ -93,10 +93,10 @@ const groups = [
 
 const customerSearchTargets = [
   { label: "Dashboard", href: "/customer/dashboard" },
-  { label: "My services and shipments", href: "/customer/dashboard?view=shipments" },
-  { label: "Request a new service", href: "/component/request-service" },
+  { label: "My services and shipments", href: "/customer/services" },
+  { label: "Request a new service", href: "/customer/services/new" },
   { label: "Tax information and invoices", href: "/customer/dashboard?view=tax-records" },
-  { label: "Customer documents", href: "/customer/dashboard?view=documents" },
+  { label: "Customer documents", href: "/customer/documents" },
   { label: "Notifications", href: "/customer/notifications" },
   { label: "Messages", href: "/customer/messages" },
   { label: "Support requests and contact", href: "/customer/dashboard?view=support-requests" },
@@ -143,12 +143,19 @@ export function CustomerShell({ children }: { children: ReactNode }) {
   const user = useAuthStore((state) => state.user);
   const hasDocumentRedFlag = useNotificationStore((state) => state.hasDocumentRedFlag);
   const fetchDocumentMonitoringAlerts = useNotificationStore((state) => state.fetchDocumentMonitoringAlerts);
+  const notifications = useNotificationStore((state) => state.notifications);
+  const notificationError = useNotificationStore((state) => state.error);
+  const notificationLoading = useNotificationStore((state) => state.loading);
+  const unreadNotificationCount = useNotificationStore((state) => state.unreadCount);
+  const fetchNotifications = useNotificationStore((state) => state.fetchNotifications);
+  const markNotificationAsRead = useNotificationStore((state) => state.markAsRead);
   const [summary, setSummary] = useState<SidebarSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const accountName =
     [user?.firstName, user?.lastName].filter(Boolean).join(" ") ||
     user?.username ||
@@ -169,6 +176,10 @@ export function CustomerShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     void fetchDocumentMonitoringAlerts();
   }, [fetchDocumentMonitoringAlerts]);
+
+  useEffect(() => {
+    void fetchNotifications();
+  }, [fetchNotifications]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -392,16 +403,56 @@ export function CustomerShell({ children }: { children: ReactNode }) {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
-            <button
-              type="button"
-              onClick={() => router.push(`/${lang}/customer/notifications`)}
-              className="relative flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
-              aria-label="Open notifications"
-              title="Notifications"
-            >
-              <Bell className="h-[19px] w-[19px]" />
-              {hasDocumentRedFlag && <span className="absolute right-[7px] top-[6px] h-2 w-2 rounded-full bg-red-500 ring-2 ring-white" />}
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setNotificationsOpen((open) => !open)}
+                className="relative flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+                aria-label="Open notifications"
+                aria-expanded={notificationsOpen}
+                title="Notifications"
+              >
+                <Bell className="h-[19px] w-[19px]" />
+                {(hasDocumentRedFlag || unreadNotificationCount > 0) && <span className="absolute right-[7px] top-[6px] h-2 w-2 rounded-full bg-red-500 ring-2 ring-white" />}
+              </button>
+              {notificationsOpen && (
+                <div className="absolute right-0 top-11 z-40 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+                  <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">Notifications</p>
+                      <p className="text-xs text-slate-500">{unreadNotificationCount} unread</p>
+                    </div>
+                    <button type="button" onClick={() => { setNotificationsOpen(false); router.push(`/${lang}/customer/notifications`); }} className="text-xs font-semibold text-blue-700 hover:underline">
+                      View all
+                    </button>
+                  </div>
+                  <div className="max-h-80 overflow-y-auto">
+                    {notificationLoading && <p className="p-4 text-sm text-slate-500">Loading notifications…</p>}
+                    {!notificationLoading && notificationError && <p role="alert" className="p-4 text-sm text-rose-700">{notificationError}</p>}
+                    {!notificationLoading && !notificationError && notifications.length === 0 && <p className="p-4 text-sm text-slate-500">No notifications.</p>}
+                    {!notificationLoading && notifications.slice(0, 6).map((notification) => (
+                      <button
+                        key={notification.id}
+                        type="button"
+                        onClick={() => {
+                          if (!notification.isRead) void markNotificationAsRead(notification.id);
+                          setNotificationsOpen(false);
+                          router.push(`/${lang}/customer/notifications`);
+                        }}
+                        className={`block w-full border-b border-slate-100 px-4 py-3 text-left last:border-0 hover:bg-slate-50 ${notification.isRead ? "bg-white" : "bg-blue-50/50"}`}
+                      >
+                        <span className="flex items-start justify-between gap-3">
+                          <span className="text-sm font-semibold text-slate-800">{notification.title}</span>
+                          {!notification.isRead && <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-blue-600" />}
+                        </span>
+                        <span className="mt-1 block line-clamp-2 text-xs text-slate-600">{notification.description}</span>
+                        <span className="mt-1 block text-[11px] text-slate-400">{notification.time}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => router.push(`/${lang}/customer/dashboard?view=support-requests`)}

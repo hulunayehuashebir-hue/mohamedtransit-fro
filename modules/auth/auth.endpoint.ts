@@ -4,6 +4,7 @@ import { API_ROUTES } from "@/modules/api";
 import { normalizeApiBaseUrl } from "@/modules/utils/axios/config";
 import { getTokenClient } from "@/modules/utils/token/client-token.storage";
 import type {
+  AdminResetPasswordRequest,
   ChangePasswordRequest,
   EmailResetPasswordRequest,
   ForgotPasswordRequest,
@@ -34,7 +35,42 @@ export type AuthResponse = Record<string, unknown> & {
 };
 
 export const signup = async (user: FormData | IUser | unknown): Promise<AuthResponse> => {
-  return http.post({ url: authEndpoints.signup, data: user });
+  const isFormData = user instanceof FormData;
+  const response = await fetch("/api/auth/signup", {
+    method: "POST",
+    headers: isFormData
+      ? undefined
+      : {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+    body: isFormData ? user : JSON.stringify(user ?? {}),
+    cache: "no-store",
+  });
+
+  const text = await response.text();
+  let body: unknown = null;
+  if (text) {
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = text;
+    }
+  }
+
+  if (!response.ok) {
+    if (typeof body === "string" && body.trim()) throw new Error(body);
+    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+      const record = body as Record<string, unknown>;
+      const message = [record.message, record.detail, record.error, record.title].find(
+        (value): value is string => typeof value === "string" && Boolean(value.trim()),
+      );
+      if (message) throw new Error(message);
+    }
+    throw new Error(`Sign up failed (${response.status}).`);
+  }
+
+  return (body ?? {}) as AuthResponse;
 };
 
 export const login = (payload: ILogin): Promise<LoginResponse> => {
@@ -140,7 +176,9 @@ export const updateAccountProfile = (payload: UpdateUserRequest): Promise<unknow
 export const forgotPassword = (payload: ForgotPasswordRequest): Promise<AuthResponse> =>
   http.post({ url: authEndpoints.forgotPassword, data: payload });
 
-export const resetPassword = (payload: ResetPasswordRequest): Promise<AuthResponse> =>
+export const resetPassword = (
+  payload: ResetPasswordRequest | AdminResetPasswordRequest | EmailResetPasswordRequest
+): Promise<AuthResponse> =>
   http.post({ url: authEndpoints.resetPassword, data: payload });
 
 export const resetPasswordFromEmail = (

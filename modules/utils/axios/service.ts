@@ -22,6 +22,8 @@ interface ApiResponse<T = unknown> {
   isError?: boolean;
   errors?: ApiError[] | Record<string, string[]>;
   message?: string;
+  detail?: string;
+  title?: string;
   payload?: T | null;
 
   response?: {
@@ -55,8 +57,19 @@ const getApiErrorMessage = (value?: unknown): string | undefined => {
     }
   }
 
-  return data?.message?.trim() || undefined;
+  return data?.message?.trim() || data?.detail?.trim() || data?.title?.trim() || undefined;
 };
+
+const serializeDiagnostic = (value: unknown): string => {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const isPasswordResetRequest = (url?: string): boolean =>
+  url?.split("?")[0].toLowerCase().endsWith("/password/resetpassword") ?? false;
 
 /* =========================================================
    Axios Instance
@@ -113,11 +126,37 @@ service.interceptors.request.use(
     }
 
     if (process.env.NODE_ENV === "development") {
-      console.log(
-        "➡️ API Request:",
-        requestConfig.method?.toUpperCase(),
-        `${requestConfig.baseURL}${requestConfig.url}`
-      );
+      const isServiceDocumentsRequest = requestConfig.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/document/getservicedocuments");
+      const isManagerAssignmentRequest = requestConfig.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/manager/assignexecutor");
+      const isStageUpdateRequest = requestConfig.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/shipments/updateservicestage");
+      if (isManagerAssignmentRequest || isStageUpdateRequest) {
+        const requestName = isManagerAssignmentRequest
+          ? "Manager AssignExecutor"
+          : "Shipment UpdateServiceStage";
+        console.info(`➡️ ${requestName} request:`, serializeDiagnostic({
+          name: requestName,
+          method: requestConfig.method?.toUpperCase(),
+          path: service.getUri(requestConfig),
+          payload: requestConfig.data ?? null,
+        }));
+      } else {
+        console.log(
+          "➡️ API Request:",
+          requestConfig.method?.toUpperCase(),
+          isServiceDocumentsRequest
+            ? service.getUri(requestConfig)
+            : `${requestConfig.baseURL}${requestConfig.url}`
+        );
+      }
     }
 
     return requestConfig;
@@ -134,14 +173,6 @@ service.interceptors.request.use(
 service.interceptors.response.use(
   (response: AxiosResponse<ApiResponse>) => {
     const data = response.data;
-
-    if (
-      response.status === 400 &&
-      response.config.url?.split("?")[0].toLowerCase().endsWith("/document/getservicedocuments") &&
-      JSON.stringify(data).toLowerCase().includes("no document data")
-    ) {
-      return [] as unknown as AxiosResponse<ApiResponse>;
-    }
 
     if (process.env.NODE_ENV === "development") {
       console.log(
@@ -171,7 +202,9 @@ service.interceptors.response.use(
     }
 
     if (response.status === 401 || data?.statusCode === 401) {
-      redirectToLogin();
+      if (!isPasswordResetRequest(response.config.url)) {
+        redirectToLogin();
+      }
       return Promise.reject("Unauthorized access");
     }
 
@@ -184,13 +217,92 @@ service.interceptors.response.use(
       const status = error.response.status;
       const data = error.response.data;
       const apiErrorMessage = getApiErrorMessage(data);
-
-      console.error("❌ API Error Path:", error.config?.url);
-      console.error("❌ API Error Status:", status, data);
-
       if (status === 401) {
-        redirectToLogin();
+        if (!isPasswordResetRequest(error.config?.url)) {
+          redirectToLogin();
+        }
         return Promise.reject(apiErrorMessage || "Unauthorized access");
+      }
+
+      const requestPath = error.config
+        ? service.getUri(error.config)
+        : undefined;
+      const isAssessorRequest = error.config?.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .startsWith("/assessor/");
+      if (status === 403 && isAssessorRequest) {
+        console.warn("Assessor API request denied:", {
+          path: requestPath,
+          status,
+        });
+        return Promise.reject(
+          "Your account is not authorized to access Assessor services. Sign in with an account assigned the Assessor role.",
+        );
+      }
+
+      const isServiceDocumentsRequest = error.config?.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/document/getservicedocuments");
+      const isForgotPasswordRequest = error.config?.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/password/forgotpassword");
+      const isManagerAssignmentRequest = error.config?.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/manager/assignexecutor");
+      const isStageUpdateRequest = error.config?.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/shipments/updateservicestage");
+
+      if (isServiceDocumentsRequest) {
+        console.warn("⚠️ Service documents API request failed:", {
+          path: requestPath,
+          status,
+          response: data,
+        });
+      } else if (
+        isForgotPasswordRequest &&
+        status === 404 &&
+        /account\s+(does\s+not\s+exist|not\s+found)/i.test(apiErrorMessage ?? "")
+      ) {
+        console.warn("Forgot-password request rejected: account not found.", {
+          path: requestPath,
+          status,
+          message: apiErrorMessage,
+        });
+      } else if (isManagerAssignmentRequest) {
+        console.error("❌ Manager AssignExecutor request failed:", serializeDiagnostic({
+          path: requestPath,
+          status,
+          statusText: error.response.statusText,
+          message: error.message,
+          payload: error.config?.data ?? null,
+          response: data ?? null,
+        }));
+      } else if (isStageUpdateRequest) {
+        console.error("❌ Shipment UpdateServiceStage request failed:", serializeDiagnostic({
+          path: requestPath,
+          status,
+          statusText: error.response.statusText,
+          message: error.message,
+          payload: error.config?.data ?? null,
+          response: data ?? null,
+        }));
+      } else {
+        console.error("❌ API Error Path:", error.config?.url);
+        console.error("❌ API Error Status:", status, data);
+      }
+
+      if (
+        status === 400 &&
+        isServiceDocumentsRequest &&
+        JSON.stringify(data).toLowerCase().includes("no document data")
+      ) {
+        return Promise.resolve([]);
       }
 
       if (apiErrorMessage) {

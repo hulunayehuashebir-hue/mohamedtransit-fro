@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { Suspense, useState } from "react";
 import {
   Mail,
   Lock,
@@ -14,6 +14,8 @@ import Image from "next/image";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import useAuthStore from "@/modules/auth/auth.store";
+import englishMessages from "@/dictionaries/en.json";
+import amharicMessages from "@/dictionaries/am.json";
 
 const getRoleName = (value: unknown): string => {
   if (!value) return "";
@@ -52,12 +54,13 @@ const getRoleName = (value: unknown): string => {
   return "";
 };
 
-export default function LoginPage() {
+function LoginPageContent() {
   const params = useParams();
   const router = useRouter();
   const searchParams = useSearchParams();
 
   const lang = (params.lang as "am" | "en") || "en";
+  const messages = lang === "am" ? amharicMessages : englishMessages;
   const callbackUrl = searchParams.get("callbackUrl") || "";
 
   const [showPassword, setShowPassword] = useState(false);
@@ -102,6 +105,26 @@ export default function LoginPage() {
 
   const normalizeRole = (roleName: string): string => roleName.trim().toLowerCase().replace(/[^a-z]/g, "");
 
+  const hasCustomerRole = (value: unknown): boolean => {
+    if (typeof value === "string") {
+      const role = normalizeRole(value);
+      return role.includes("customer") || role.includes("importer");
+    }
+    if (Array.isArray(value)) return value.some(hasCustomerRole);
+    if (!value || typeof value !== "object") return false;
+
+    const role = value as Record<string, unknown>;
+    return [
+      role.role,
+      role.roleName,
+      role.Role,
+      role.RoleName,
+      role.name,
+      role.roles,
+      role.userRoles,
+    ].some(hasCustomerRole);
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -112,6 +135,16 @@ export default function LoginPage() {
         username: email.trim(),
         password,
       });
+
+      if (hasCustomerRole(userObj)) {
+        const customerBasePath = `/${lang}/customer`;
+        const customerDestination =
+          callbackUrl === customerBasePath || callbackUrl.startsWith(`${customerBasePath}/`)
+            ? callbackUrl
+            : `${customerBasePath}/dashboard`;
+        router.push(customerDestination);
+        return;
+      }
 
       const extractedRole = normalizeRole(extractRole(userObj));
       const destination = callbackUrl && callbackUrl.startsWith("/") ? callbackUrl : `/${lang}/customer`;
@@ -179,6 +212,7 @@ export default function LoginPage() {
           "ተጠቃሚው አልተገኘም ወይም የተሳሳተ password ነው!"
       );
     }
+
   };
 
   return (
@@ -217,7 +251,7 @@ export default function LoginPage() {
             </div>
 
             <div className="space-y-1">
-              
+              <h1 className="text-xl font-semibold">{messages.title}</h1>
             </div>
           </div>
 
@@ -232,7 +266,7 @@ export default function LoginPage() {
             {/* Username */}
             <div>
               <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-700">
-                Email or Username
+                {messages.email}
               </label>
 
               <div className="relative">
@@ -255,14 +289,14 @@ export default function LoginPage() {
             <div>
               <div className="mb-2 flex items-center justify-between">
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                  Password
+                  {messages.password}
                 </label>
 
                 <Link
                   href={`/${lang}/auth/forgot-password`}
                   className="text-xs font-semibold text-blue-600 transition hover:text-blue-800"
                 >
-                  Forgot Password?
+                  {messages.forgot}
                 </Link>
               </div>
 
@@ -303,11 +337,11 @@ export default function LoginPage() {
               {loading ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Logging in...</span>
+                  <span>{messages.loading}</span>
                 </>
               ) : (
                 <>
-                  <span>Login</span>
+                  <span>{messages.login}</span>
                   <ArrowRight className="h-4 w-4" />
                 </>
               )}
@@ -316,12 +350,12 @@ export default function LoginPage() {
             {/* Signup */}
             <div className="pt-2 text-center">
               <p className="text-xs text-slate-500">
-                New user?{" "}
+                {messages.signupPrompt}{" "}
                 <Link
                   href={`/${lang}/auth/signup`}
                   className="font-semibold text-blue-600 hover:underline"
                 >
-                  Sign up
+                  {messages.signupLink}
                 </Link>
               </p>
             </div>
@@ -330,11 +364,25 @@ export default function LoginPage() {
           {/* Footer */}
           <div className="border-t border-slate-100 bg-slate-50/50 p-3 text-center">
             <p className="text-[9px] font-medium uppercase tracking-[0.12em] text-slate-400">
-              Secure Transit Portal
+              {messages.footer}
             </p>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto w-full max-w-[420px] rounded-2xl bg-white/90 p-6 text-center text-sm text-slate-500 shadow-xl">
+          Loading login...
+        </div>
+      }
+    >
+      <LoginPageContent />
+    </Suspense>
   );
 }

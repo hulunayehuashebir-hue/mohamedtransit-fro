@@ -1,4 +1,11 @@
 export interface CustomerRegisterPayload {
+  role?: "Customer";
+  firstName?: string;
+  lastName?: string;
+  username?: string;
+  email?: string;
+  phone?: string;
+  password?: string;
   businessName: string;
   tinNumber: string;
   businessLicense: string;
@@ -90,6 +97,11 @@ export interface CustomerCreateServicePayload {
   destination: string;
 }
 
+export interface CustomerInspectionTypePayload {
+  serviceId: string | number;
+  inspectionType: "Red" | "Yellow" | "Green";
+}
+
 export interface CustomerUpdateProfilePayload {
   businessName?: string;
   businessAddress?: string;
@@ -109,6 +121,7 @@ export interface CustomerServiceApiItem {
   declaredValue: number;
   taxCategory: string;
   countryOfOrigin: string;
+  destination?: string;
   serviceType: number;
   status: number;
   riskLevel: number;

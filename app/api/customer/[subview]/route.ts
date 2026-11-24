@@ -70,7 +70,7 @@ const proxyRequest = async (
 
   const backendPath =
     subview === "shipments"
-      ? `/Shipments/GetByImporter/${customerUserId}`
+      ? "/Customer/GetMyServices"
       : subview === "stages"
         ? "/Shipments/GetStages"
         : BACKEND_PATHS[subview];

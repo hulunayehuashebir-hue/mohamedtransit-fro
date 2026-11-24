@@ -36,6 +36,7 @@ export interface ManagerRecentService {
 
 export interface ManagerAssignedUserSummary {
   id?: number | string;
+  name?: string | null;
   username?: string | null;
   email?: string | null;
   firstName?: string | null;
@@ -43,26 +44,60 @@ export interface ManagerAssignedUserSummary {
   businessName?: string | null;
   profilePhoto?: string | null;
   phone?: string | null;
+  role?: string | null;
+  is_active?: boolean;
+  customer_code?: string | null;
+  tin?: string | null;
+  contact_person?: string | null;
 }
 
 export interface ManagerStaff extends ManagerAssignedUserSummary {
   id: number | string;
   phone?: string | null;
+  isActive?: boolean;
   isAccountLocked?: boolean;
   accountStatus?: number | string | null;
   roleIds?: number[];
   roleNames?: string[];
+  assignedRoles?: Array<{ id: number; roleName: string }>;
   branchName?: string | null;
   openCases?: number | null;
   availability?: string | null;
 }
 
 export interface ManagerExecutorAssignmentRequest {
-  [key: string]: unknown;
+  shipmentId: number;
+  caseExecutorId: number;
+}
+
+export interface ManagerAddStageDiscussionRequest {
+  serviceId: number;
+  stageId: number;
+  comment: string;
+}
+
+export interface ManagerNotifyImporterRequest {
+  serviceId: number;
+  subject?: string;
+  message: string;
+  isUrgent?: boolean;
+}
+
+export interface ManagerEscalateServiceRequest {
+  serviceId: number;
+  reason: string;
 }
 
 export interface ManagerExecutorAssignment extends ManagerRecentService {
   trackingNumber: string;
+  code?: string | null;
+  reference_number?: string | null;
+  cargo_description?: string | null;
+  route_summary?: string | null;
+  estimated_arrival?: string | null;
+  risk_channel?: "blue" | "green" | "yellow" | "red" | null;
+  risk_channel_label?: string | null;
+  risk_channel_description?: string | null;
   importerId?: number | string;
   importer: ManagerAssignedUserSummary | null;
   description: string;
@@ -71,6 +106,7 @@ export interface ManagerExecutorAssignment extends ManagerRecentService {
   createdByUser: ManagerAssignedUserSummary | null;
   assignedCaseExecutorId: number | string | null;
   assignedCaseExecutor: ManagerAssignedUserSummary | null;
+  assigned_staff: ManagerAssignedStaff;
   assignedAssessorId: number | string | null;
   assignedAssessor: ManagerAssignedUserSummary | null;
   assignmentNotes: string | null;
@@ -102,27 +138,98 @@ export interface ManagerServiceMessage {
   recordStatus: number;
 }
 
+export interface ManagerStageDiscussion {
+  id: string;
+  comment: string;
+  createdAt: string | null;
+  author: string | null;
+}
+
+export interface ManagerServiceActivity {
+  id: string;
+  label: string;
+  date: string | null;
+}
+
+export interface ManagerConsignmentDetails {
+  description: string | null;
+  origin: string | null;
+  destination: string | null;
+  declaredValue: number | string | null;
+  taxCategory: string | null;
+  countryOfOrigin: string | null;
+  registeredDate: string | null;
+}
+
 export interface ManagerServiceStage {
   id?: number | string;
+  order: number;
+  serviceStageId?: number | string;
   stageExecutionId?: number | string;
   serviceStageExecutionId?: number | string;
   executionId?: number | string;
   stageName?: string | null;
-  name?: string | null;
-  status?: number | string | null;
+  name: string;
+  status: ManagerWorkflowStageStatus | null;
+  apiStatus?: number | string | null;
   stageStatus?: number | string | null;
   currentStatus?: number | string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+  updated_at: string | null;
   completedAt?: string | null;
-  notes?: string | null;
+  notes: string | null;
   comments?: string | null;
+  documents: ManagerServiceDocument[];
   [key: string]: unknown;
+}
+
+export type ManagerWorkflowStageStatus =
+  | "completed"
+  | "needs_review"
+  | "in_progress"
+  | "not_started";
+
+export const MANAGER_WORKFLOW_STAGE_NAMES = [
+  "Prepayment Invoice",
+  "Transit Permission",
+  "Amendment",
+  "Drop Risk",
+  "Delivery Order",
+  "Warehouse Status",
+  "Inspection",
+  "Assessment & Tax Payment",
+  "Emergency / Spot",
+  "Exit & Storage Payment",
+  "Transportation",
+  "Clearance",
+] as const;
+
+export interface ManagerAssignedStaffMember {
+  id: number | string;
+  name: string;
+  role: string;
+  is_active: boolean;
+}
+
+export interface ManagerAssignedStaff {
+  executor: ManagerAssignedStaffMember | null;
+  assessor: ManagerAssignedStaffMember | null;
+}
+
+export interface ManagerImporterDetail extends ManagerAssignedUserSummary {
+  id: number | string;
+  name: string;
+  customer_code: string | null;
+  tin: string | null;
+  contact_person: string | null;
+  phone: string | null;
 }
 
 export interface ManagerServiceDocument {
   id?: number | string;
   stageId?: number | string | null;
+  status?: string | number | null;
   fileName?: string | null;
   originalFileName?: string | null;
   fileExtension?: string | null;
@@ -137,6 +244,7 @@ export interface ManagerServiceDocument {
 }
 
 export interface ManagerServiceDetail extends ManagerExecutorAssignment {
+  importer: ManagerImporterDetail | null;
   stages: ManagerServiceStage[];
   documents: ManagerServiceDocument[];
   messages: ManagerServiceMessage[];
@@ -145,13 +253,23 @@ export interface ManagerServiceDetail extends ManagerExecutorAssignment {
 export interface ManagerCustomerQuery {
   page?: number;
   pageSize?: number;
-  [key: string]: unknown;
+  isVerified?: boolean;
+  searchTerm?: string;
 }
 
 export interface ManagerServiceQuery {
+  status?: string;
+  type?: string;
+  customerId?: number;
+  caseExecutorId?: number;
   page?: number;
   pageSize?: number;
-  [key: string]: unknown;
+}
+
+export interface ManagerNotificationQuery {
+  unreadOnly?: boolean;
+  page?: number;
+  pageSize?: number;
 }
 
 export interface ManagerCustomerDocumentSummary {
@@ -260,5 +378,6 @@ export interface ManagerReportsAnalytics {
     casesClosed: number;
     averageCycleDays: number | null;
     openLoad: number;
+    onTimeRate?: number | null;
   }[];
 }
