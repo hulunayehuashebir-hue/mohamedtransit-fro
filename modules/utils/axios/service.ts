@@ -92,14 +92,15 @@ const service: AxiosInstance = axios.create({
 
 service.interceptors.request.use(
   async (requestConfig: InternalAxiosRequestConfig) => {
-    let token = await getToken();
+    if (!requestConfig.headers.has("Authorization")) {
+      let token = await getToken();
+      if (!token) {
+        token = getTokenClient();
+      }
 
-    if (!token) {
-      token = getTokenClient();
-    }
-
-    if (token) {
-      requestConfig.headers.Authorization = `Bearer ${token}`;
+      if (token) {
+        requestConfig.headers.Authorization = `Bearer ${token}`;
+      }
     }
 
     if (requestConfig.data instanceof FormData) {
@@ -257,6 +258,10 @@ service.interceptors.response.use(
         ?.split("?")[0]
         .toLowerCase()
         .endsWith("/shipments/updateservicestage");
+      const isCustomerRegistrationRequest = error.config?.url
+        ?.split("?")[0]
+        .toLowerCase()
+        .endsWith("/customer/register");
 
       if (isServiceDocumentsRequest) {
         console.warn("⚠️ Service documents API request failed:", {
@@ -292,7 +297,9 @@ service.interceptors.response.use(
           payload: error.config?.data ?? null,
           response: data ?? null,
         }));
-      } else {
+      } else if (
+        !(isCustomerRegistrationRequest && (status === 400 || status === 409))
+      ) {
         console.error("❌ API Error Path:", error.config?.url);
         console.error("❌ API Error Status:", status, data);
       }

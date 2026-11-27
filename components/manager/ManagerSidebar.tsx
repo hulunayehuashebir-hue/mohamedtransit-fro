@@ -21,6 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { useManagerStore } from "@/store/managerStore";
 import useAuthStore from "@/modules/auth/auth.store";
+import { useManagerStore as useManagerServicesStore } from "@/modules/manager/manager.store";
 
 export type ManagerRoleType = "manager" | "administrator" | "supervisor";
 
@@ -67,6 +68,9 @@ export default function ManagerSidebar() {
 
   const { sidebarCollapsed, mobileSidebarOpen, closeMobileSidebar } = useManagerStore();
   const { logout } = useAuthStore();
+  const serviceCount = useManagerServicesStore((state) => state.serviceCount);
+  const fetchServices = useManagerServicesStore((state) => state.fetchServices);
+  const requestedServiceCount = useRef(false);
   const [roleOpen, setRoleOpen] = useState(false);
   const roleDropdownRef = useRef<HTMLDivElement>(null);
   const roleTriggerRef = useRef<HTMLButtonElement>(null);
@@ -78,13 +82,6 @@ export default function ManagerSidebar() {
     Account: true,
   });
 
-  const navigationSections = [
-    { title: "Overview", items: overviewItems },
-    { title: "Operations", items: operationsItems },
-    { title: "Governance", items: governanceItems },
-    { title: "Communication", items: communicationItems },
-    { title: "Account", items: accountItems },
-  ];
   const activeRole = pathname.includes("/customer")
     ? "customer"
     : pathname.includes("/admin/manager")
@@ -95,6 +92,13 @@ export default function ManagerSidebar() {
           ? "assessor"
           : "data-encoder";
   const currentRole = demonstrationRoles.find((role) => role.id === activeRole) ?? demonstrationRoles[1];
+
+  useEffect(() => {
+    if (serviceCount === 0 && !requestedServiceCount.current) {
+      requestedServiceCount.current = true;
+      void fetchServices({ page: 1, pageSize: 1 });
+    }
+  }, [fetchServices, serviceCount]);
 
   useEffect(() => {
     if (!roleOpen) return;
@@ -118,6 +122,21 @@ export default function ManagerSidebar() {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [roleOpen]);
+
+  const navigationSections = [
+    { title: "Overview", items: overviewItems },
+    {
+      title: "Operations",
+      items: operationsItems.map((item) =>
+        item.href === "/admin/manager/services"
+          ? { ...item, badge: serviceCount ? String(serviceCount) : null }
+          : item,
+      ),
+    },
+    { title: "Governance", items: governanceItems },
+    { title: "Communication", items: communicationItems },
+    { title: "Account", items: accountItems },
+  ];
 
   const isActive = (href: string) => {
     const fullHref = `/${lang}${href}`;

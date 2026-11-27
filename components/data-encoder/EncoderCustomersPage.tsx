@@ -31,6 +31,8 @@ import { useRolesStore } from "@/modules/roles/roles.store";
 
 type CustomerRow = {
 	id: string;
+	userId: string;
+	profileComplete: boolean;
 	businessName: string;
 	tinNumber: string;
 	businessLicense: string;
@@ -42,6 +44,25 @@ type CustomerRow = {
 	activeCases: number | null;
 	kycStatus: "Verified" | "Pending" | "Revision";
 };
+
+const isCompletedCustomerProfile = (record: Record<string, unknown>): boolean =>
+	[
+		"businessName",
+		"tinNumber",
+		"businessLicense",
+		"businessAddress",
+		"city",
+		"state",
+		"postalCode",
+		"contactPerson",
+		"contactPhone",
+		"contactEmail",
+		"businessType",
+		"importLicense",
+	].every((field) => {
+		const value = findValue(record, field);
+		return typeof value === "string" && Boolean(value.trim());
+	});
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -346,7 +367,12 @@ export default function EncoderCustomersPage({
 	const [accountCreateError, setAccountCreateError] = useState<string | null>(null);
 	const [accountFieldErrors, setAccountFieldErrors] = useState<Record<string, string>>({});
 	const [selectedAccountId, setSelectedAccountId] = useState("");
-	const selectedAccountIsAvailable = customerAccounts.some(
+	const availableCustomerAccounts = customerAccounts.filter((account) =>
+		!customers.some((customer) =>
+			customer.profileComplete && customer.userId === account.id,
+		),
+	);
+	const selectedAccountIsAvailable = availableCustomerAccounts.some(
 		(account) => account.id === selectedAccountId,
 	);
 	const [newAccount, setNewAccount] = useState({
@@ -359,6 +385,12 @@ export default function EncoderCustomersPage({
 	});
 	const [profilePhoto, setProfilePhoto] = useState<File | null>(null);
 	const [success, setSuccess] = useState<string | null>(null);
+	const [kycCustomer, setKycCustomer] = useState<CustomerRow | null>(null);
+	const [kycDocumentType, setKycDocumentType] = useState("Business License");
+	const [kycExpiresAt, setKycExpiresAt] = useState("");
+	const [kycFile, setKycFile] = useState<File | null>(null);
+	const [kycUploading, setKycUploading] = useState(false);
+	const [kycUploadError, setKycUploadError] = useState<string | null>(null);
 
 	const [createOpen, setCreateOpen] = useState(createPage);
 	const [search, setSearch] = useState("");
@@ -458,6 +490,7 @@ export default function EncoderCustomersPage({
 
 			const createdUserId = readCreatedUserId(body);
 			const accounts = await loadCustomerAccounts();
+			await loadCustomers();
 			const createdAccount =
 				accounts.find((account) => account.email?.toLowerCase() === contactEmail.toLowerCase()) ??
 				(createdUserId
@@ -608,6 +641,8 @@ export default function EncoderCustomersPage({
 
 					return {
 						id,
+						userId: readText(findValue(record, "userId", "accountId")),
+						profileComplete: isCompletedCustomerProfile(record),
 						businessName,
 						tinNumber,
 						businessLicense: readText(findValue(record, "businessLicense", "licenseNumber")),
@@ -665,12 +700,15 @@ export default function EncoderCustomersPage({
 		}
 
 		const formData = new FormData(form);
+		const formFields = Object.fromEntries(
+			[...formData.entries()].filter((entry): entry is [string, string] =>
+				typeof entry[1] === "string",
+			),
+		);
 
 		let payload: Record<string, unknown>;
 		try {
-			payload = normalizeCustomerCreatePayload(
-				Object.fromEntries(formData.entries()),
-			);
+			payload = normalizeCustomerCreatePayload(formFields);
 		} catch (payloadError: unknown) {
 			setSubmitError(
 				payloadError instanceof Error
@@ -697,30 +735,40 @@ export default function EncoderCustomersPage({
 			return;
 		}
 
-		/*
-		 * The expiry field is optional.
-		 * If the user leaves it empty, send null instead of "".
-		 */
-		const expiry = payload.importLicenseExpiry;
-		if (typeof expiry === "string" && expiry.trim()) {
-			const expiryDate = new Date(expiry);
-			if (Number.isNaN(expiryDate.getTime())) {
-				const dateError = "Enter a valid import license expiry date.";
-				console.warn("Customer form validation failed:", { importLicenseExpiry: dateError });
-				setFieldErrors({ importLicenseExpiry: dateError });
-				setSubmitting(false);
-				return;
+		for (const field of [
+			"businessLicenseExpiresAt",
+			"importLicenseExpiry",
+			"tinCertificateExpiresAt",
+		]) {
+			const expiry = payload[field];
+			if (typeof expiry === "string" && expiry.trim()) {
+				const expiryDate = new Date(expiry);
+				if (Number.isNaN(expiryDate.getTime())) {
+					const dateError = `Enter a valid ${field} date.`;
+					console.warn("Customer form validation failed:", { [field]: dateError });
+					setFieldErrors({ [field]: dateError });
+					setSubmitting(false);
+					return;
+				}
+				payload[field] = expiryDate.toISOString();
+			} else {
+				payload[field] = null;
 			}
-			payload.importLicenseExpiry = expiryDate.toISOString();
-		} else {
-			payload.importLicenseExpiry = null;
 		}
 		for (const [key, value] of Object.entries(payload)) {
 			if (value === "") payload[key] = null;
 		}
 
 		try {
-			const response = await DataEncoderEndpoints.createCustomer(payload);
+			const existingProfile = customers.find((customer) =>
+				customer.userId === String(payload.userId) && !customer.profileComplete,
+			);
+			const response = existingProfile
+				? await DataEncoderEndpoints.updateCustomer({
+						...payload,
+						id: existingProfile.id,
+					})
+				: await DataEncoderEndpoints.createCustomer(payload);
 			const body = await readResponseBody(response);
 			if (response.status === 401 || response.status === 403) {
 				await redirectToLogin();
@@ -743,9 +791,79 @@ export default function EncoderCustomersPage({
 
 			const businessName = String(payload.businessName ?? "").trim();
 			const tinNumber = String(payload.tinNumber ?? "").trim();
-			const createdId = readCreatedCustomerId(body);
+			const createdId = readCreatedCustomerId(body) ?? existingProfile?.id ?? null;
+			const selectedKycDocuments = [
+				{
+					field: "businessLicenseFile",
+					documentType: "Business License",
+					expiresAt: payload.businessLicenseExpiresAt,
+				},
+				{
+					field: "importLicenseFile",
+					documentType: "Import License",
+					expiresAt: payload.importLicenseExpiry,
+				},
+				{
+					field: "tinCertificateFile",
+					documentType: "TIN Certificate",
+					expiresAt: payload.tinCertificateExpiresAt,
+				},
+			].flatMap((document) => {
+				const uploadedFile = formData.get(document.field);
+				return typeof uploadedFile === "string" || !uploadedFile || !uploadedFile.size
+					? []
+					: [{ ...document, file: uploadedFile }];
+			});
+			const kycUploadFailures: string[] = [];
+			if (selectedKycDocuments.length && !createdId) {
+				kycUploadFailures.push(
+					"Could not determine the new customer ID. Refresh the directory and attach the files from the customer row.",
+				);
+			} else if (createdId) {
+				for (const document of selectedKycDocuments) {
+					const uploadPayload = new FormData();
+					uploadPayload.set("file", document.file, document.file.name);
+					uploadPayload.set("documentType", document.documentType);
+					if (typeof document.expiresAt === "string" && document.expiresAt) {
+						uploadPayload.set("expiresAt", document.expiresAt);
+					}
+
+					try {
+						const uploadResponse = await DataEncoderEndpoints.uploadCustomerKycDocument(
+							createdId,
+							uploadPayload,
+						);
+						const uploadBody = await readResponseBody(uploadResponse);
+						if (uploadResponse.status === 401 || uploadResponse.status === 403) {
+							await redirectToLogin();
+							return;
+						}
+						if (
+							!uploadResponse.ok ||
+							(isRecord(uploadBody) &&
+								(uploadBody.error === true ||
+									uploadBody.isError === true ||
+									(typeof uploadBody.statusCode === "number" && uploadBody.statusCode >= 400)))
+						) {
+							throw new Error(
+								getResponseError(uploadBody, `Upload failed (${uploadResponse.status}).`),
+							);
+						}
+					} catch (uploadError: unknown) {
+						kycUploadFailures.push(
+							`${document.documentType}: ${
+								uploadError instanceof Error
+									? uploadError.message
+									: "Unable to upload this file."
+							}`,
+						);
+					}
+				}
+			}
 			const createdCustomer: CustomerRow = {
 				id: createdId ?? `created-${String(payload.userId)}-${Date.now()}`,
+				userId: String(payload.userId),
+				profileComplete: true,
 				businessName,
 				tinNumber,
 				businessLicense: String(payload.businessLicense ?? ""),
@@ -763,16 +881,22 @@ export default function EncoderCustomersPage({
 			setSearch("");
 			const refreshed = await loadCustomers();
 			setCustomers((current) => {
-				const alreadyListed = current.some((customer) =>
+				const existingIndex = current.findIndex((customer) =>
 					(createdId && customer.id === createdId) ||
 					(customer.tinNumber && customer.tinNumber.toLowerCase() === tinNumber.toLowerCase()),
 				);
-				return alreadyListed ? current : [createdCustomer, ...current];
+				if (existingIndex < 0) return [createdCustomer, ...current];
+				const next = [...current];
+				next[existingIndex] = { ...next[existingIndex], ...createdCustomer };
+				return next;
 			});
+			const registrationMessage = refreshed
+				? `${businessName} registered successfully${createdId ? ` (ID ${createdId})` : ""}.`
+				: `${businessName} was created${createdId ? ` (ID ${createdId})` : ""}, but the customer list could not be refreshed. The new record is shown below.`;
 			setSuccess(
-				refreshed
-					? `${businessName} registered successfully${createdId ? ` (ID ${createdId})` : ""}.`
-					: `${businessName} was created${createdId ? ` (ID ${createdId})` : ""}, but the customer list could not be refreshed. The new record is shown below.`,
+				kycUploadFailures.length
+					? `${registrationMessage} Some KYC files could not be uploaded: ${kycUploadFailures.join("; ")}`
+					: registrationMessage,
 			);
 
 			closeCreate();
@@ -784,6 +908,75 @@ export default function EncoderCustomersPage({
 			);
 		} finally {
 			setSubmitting(false);
+		}
+	};
+
+	const uploadCustomerKycDocument = async (
+		event: FormEvent<HTMLFormElement>,
+	) => {
+		event.preventDefault();
+		setKycUploadError(null);
+		if (!kycCustomer || !kycFile) {
+			setKycUploadError("Select a KYC document file.");
+			return;
+		}
+
+		const customerId = Number(kycCustomer.id);
+		if (!Number.isSafeInteger(customerId) || customerId <= 0) {
+			setKycUploadError("This customer record does not have a valid backend ID.");
+			return;
+		}
+		if (kycFile.size > 25 * 1024 * 1024) {
+			setKycUploadError("KYC documents must be 25 MB or smaller.");
+			return;
+		}
+		if (kycExpiresAt && Number.isNaN(Date.parse(kycExpiresAt))) {
+			setKycUploadError("Enter a valid expiry date.");
+			return;
+		}
+
+		const payload = new FormData();
+		payload.set("file", kycFile, kycFile.name);
+		payload.set("documentType", kycDocumentType);
+		if (kycExpiresAt) payload.set("expiresAt", kycExpiresAt);
+
+		setKycUploading(true);
+		try {
+			const response = await DataEncoderEndpoints.uploadCustomerKycDocument(
+				customerId,
+				payload,
+			);
+			const body = await readResponseBody(response);
+			if (response.status === 401 || response.status === 403) {
+				await redirectToLogin();
+				return;
+			}
+			if (
+				!response.ok ||
+				(isRecord(body) &&
+					(body.error === true ||
+						body.isError === true ||
+						(typeof body.statusCode === "number" && body.statusCode >= 400)))
+			) {
+				throw new Error(
+					getResponseError(body, `KYC upload failed (${response.status}).`),
+				);
+			}
+
+			setSuccess(`${kycDocumentType} uploaded for ${kycCustomer.businessName}.`);
+			setKycCustomer(null);
+			setKycFile(null);
+			setKycExpiresAt("");
+			setKycDocumentType("Business License");
+			await loadCustomers();
+		} catch (uploadError: unknown) {
+			setKycUploadError(
+				uploadError instanceof Error
+					? uploadError.message
+					: "Unable to upload this KYC document.",
+			);
+		} finally {
+			setKycUploading(false);
 		}
 	};
 
@@ -1045,6 +1238,9 @@ export default function EncoderCustomersPage({
 								>
 									Registered
 								</th>
+								<th scope="col" className="px-5 py-3 sm:px-7">
+									Actions
+								</th>
 							</tr>
 						</thead>
 
@@ -1105,6 +1301,30 @@ export default function EncoderCustomersPage({
 												customer.registeredAt,
 											)}
 										</td>
+										<td className="px-5 py-3.5 sm:px-7">
+											<button
+												type="button"
+												onClick={() => {
+													setKycCustomer(customer);
+													setKycDocumentType("Business License");
+													setKycExpiresAt("");
+													setKycFile(null);
+													setKycUploadError(null);
+												}}
+												disabled={!/^[1-9]\d*$/.test(customer.id) || kycUploading || customer.kycStatus === "Verified"}
+												title={
+													customer.kycStatus === "Verified"
+														? "Verified customer profiles cannot be changed."
+														: !/^[1-9]\d*$/.test(customer.id)
+															? "This customer has no valid backend ID."
+															: undefined
+												}
+												className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+											>
+												<Plus className="h-3.5 w-3.5" />
+												Add KYC
+											</button>
+										</td>
 									</tr>
 								);
 							})}
@@ -1113,7 +1333,7 @@ export default function EncoderCustomersPage({
 								customers.length === 0 && (
 									<tr>
 										<td
-											colSpan={6}
+											colSpan={7}
 											className="px-5 py-12 text-center text-sm text-slate-500"
 										>
 											Loading customer records…
@@ -1126,7 +1346,7 @@ export default function EncoderCustomersPage({
 								filteredCustomers.length === 0 && (
 									<tr>
 										<td
-											colSpan={6}
+											colSpan={7}
 											className="px-5 py-12 text-center text-sm text-slate-500"
 										>
 											{search
@@ -1243,7 +1463,7 @@ export default function EncoderCustomersPage({
 														? "Select an active customer account"
 														: "No active customer accounts available"}
 											</option>
-											{customerAccounts.map((account) => (
+											{availableCustomerAccounts.map((account) => (
 												<option key={account.id} value={account.id}>{account.label}</option>
 											))}
 										</select>
@@ -1373,18 +1593,44 @@ export default function EncoderCustomersPage({
 											{fieldErrors[name] && <span id={`${name}-error`} role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors[name]}</span>}
 										</label>
 									))}
+								</div>
+							</section>
+
+							<section className="rounded-xl border border-slate-200 p-4 sm:p-5">
+								<div className="mb-4">
+									<h3 className="text-sm font-semibold text-slate-900">KYC documents</h3>
+									<p className="mt-1 text-xs text-slate-500">Attach the customer’s business license, import license, and TIN certificate. Files are optional and expiry dates can be added.</p>
+								</div>
+								<div className="grid gap-4 sm:grid-cols-2">
+									<label className="block text-sm font-medium text-slate-700">
+										Business license file
+										<input name="businessLicenseFile" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" className="mt-1.5 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-blue-50 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-blue-700" />
+									</label>
+									<label className="block text-sm font-medium text-slate-700">
+										Business license expiry
+										<input name="businessLicenseExpiresAt" type="date" aria-invalid={Boolean(fieldErrors.businessLicenseExpiresAt)} className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+										{fieldErrors.businessLicenseExpiresAt && <span role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors.businessLicenseExpiresAt}</span>}
+									</label>
+									<label className="block text-sm font-medium text-slate-700">
+										Import license file
+										<input name="importLicenseFile" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" className="mt-1.5 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-blue-50 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-blue-700" />
+									</label>
 									<label className="block text-sm font-medium text-slate-700">
 										Import license expiry
-										<input
-											name="importLicenseExpiry"
-											type="date"
-											aria-invalid={Boolean(fieldErrors.importLicenseExpiry)}
-											aria-describedby={fieldErrors.importLicenseExpiry ? "importLicenseExpiry-error" : undefined}
-											className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-										/>
-										{fieldErrors.importLicenseExpiry && <span id="importLicenseExpiry-error" role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors.importLicenseExpiry}</span>}
+										<input name="importLicenseExpiry" type="date" aria-invalid={Boolean(fieldErrors.importLicenseExpiry)} className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+										{fieldErrors.importLicenseExpiry && <span role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors.importLicenseExpiry}</span>}
+									</label>
+									<label className="block text-sm font-medium text-slate-700">
+										TIN certificate file
+										<input name="tinCertificateFile" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" className="mt-1.5 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-blue-50 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-blue-700" />
+									</label>
+									<label className="block text-sm font-medium text-slate-700">
+										TIN certificate expiry
+										<input name="tinCertificateExpiresAt" type="date" aria-invalid={Boolean(fieldErrors.tinCertificateExpiresAt)} className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+										{fieldErrors.tinCertificateExpiresAt && <span role="alert" className="mt-1 block text-xs text-rose-700">{fieldErrors.tinCertificateExpiresAt}</span>}
 									</label>
 								</div>
+								<p className="mt-3 text-xs text-slate-500">PDF, JPG, or PNG files up to 25 MB each.</p>
 							</section>
 
 							<section className="rounded-xl border border-slate-200 p-4 sm:p-5">
@@ -1478,6 +1724,97 @@ export default function EncoderCustomersPage({
 										: !selectedAccountIsAvailable && !customerAccountsLoading
 											? "Select or create an account first"
 											: "Create customer"}
+								</button>
+							</div>
+						</form>
+					</section>
+				</div>
+			)}
+			{kycCustomer && (
+				<div
+					className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-4"
+					onMouseDown={(event) => {
+						if (event.target === event.currentTarget && !kycUploading) {
+							setKycCustomer(null);
+						}
+					}}
+				>
+					<section
+						role="dialog"
+						aria-modal="true"
+						aria-labelledby="customer-kyc-upload-title"
+						className="w-full max-w-lg rounded-xl border border-slate-200 bg-white shadow-2xl"
+					>
+						<div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+							<div>
+								<h2 id="customer-kyc-upload-title" className="text-lg font-semibold text-slate-900">
+									Attach KYC document
+								</h2>
+								<p className="mt-1 text-sm text-slate-500">{kycCustomer.businessName}</p>
+							</div>
+							<button
+								type="button"
+								aria-label="Close KYC upload"
+								onClick={() => setKycCustomer(null)}
+								disabled={kycUploading}
+								className="rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-50"
+							>
+								<X className="h-4 w-4" />
+							</button>
+						</div>
+						<form onSubmit={uploadCustomerKycDocument} className="space-y-4 p-5">
+							{kycUploadError && (
+								<p role="alert" className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+									{kycUploadError}
+								</p>
+							)}
+							<label className="block text-sm font-medium text-slate-700">
+								Document type
+								<select
+									value={kycDocumentType}
+									onChange={(event) => setKycDocumentType(event.target.value)}
+									className="mt-1.5 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm"
+								>
+									{["Business License", "Import License", "TIN Certificate"].map((type) => (
+										<option key={type}>{type}</option>
+									))}
+								</select>
+							</label>
+							<label className="block text-sm font-medium text-slate-700">
+								File
+								<input
+									required
+									type="file"
+									accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+									onChange={(event) => setKycFile(event.target.files?.[0] ?? null)}
+									className="mt-1.5 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-blue-50 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-blue-700"
+								/>
+								<span className="mt-1 block text-xs font-normal text-slate-500">PDF, JPG, or PNG; maximum 25 MB.</span>
+							</label>
+							<label className="block text-sm font-medium text-slate-700">
+								Expiry date (optional)
+								<input
+									type="date"
+									value={kycExpiresAt}
+									onChange={(event) => setKycExpiresAt(event.target.value)}
+									className="mt-1.5 h-10 w-full rounded-md border border-slate-300 px-3 text-sm"
+								/>
+							</label>
+							<div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
+								<button
+									type="button"
+									onClick={() => setKycCustomer(null)}
+									disabled={kycUploading}
+									className="rounded-md border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+								>
+									Cancel
+								</button>
+								<button
+									type="submit"
+									disabled={kycUploading || !kycFile}
+									className="rounded-md bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
+								>
+									{kycUploading ? "Uploading…" : "Upload document"}
 								</button>
 							</div>
 						</form>

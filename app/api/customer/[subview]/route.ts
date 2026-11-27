@@ -285,3 +285,93 @@ export async function GET(request: Request, { params }: RouteContext) {
   const { subview } = await params;
   return proxyRequest(request, subview);
 }
+
+export async function POST(request: Request, { params }: RouteContext) {
+  const { subview } = await params;
+  if (subview !== "kyc-documents") {
+    return NextResponse.json({ error: "Unknown customer submission." }, { status: 404 });
+  }
+
+  const accessToken = await getCustomerAccessToken();
+  if (!accessToken) {
+    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+
+  let submittedForm: FormData;
+  try {
+    submittedForm = await request.formData();
+  } catch {
+    return NextResponse.json({ error: "A valid KYC document form is required." }, { status: 400 });
+  }
+
+  const file = submittedForm.get("file");
+  const documentType = submittedForm.get("documentType");
+  if (typeof file === "string" || !file || file.size === 0) {
+    return NextResponse.json({ error: "Choose a KYC document to upload." }, { status: 400 });
+  }
+  if (
+    typeof documentType !== "string" ||
+    !["Business License", "Import License", "TIN Certificate"].includes(documentType)
+  ) {
+    return NextResponse.json({ error: "Choose a supported KYC document type." }, { status: 400 });
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    return NextResponse.json({ error: "KYC documents must be 25 MB or smaller." }, { status: 400 });
+  }
+
+  const expiresAt = submittedForm.get("expiresAt");
+  if (typeof expiresAt === "string" && expiresAt.trim()) {
+    if (Number.isNaN(Date.parse(expiresAt))) {
+      return NextResponse.json({ error: "Enter a valid expiry date." }, { status: 400 });
+    }
+    submittedForm.set("expiresAt", new Date(expiresAt).toISOString());
+  } else {
+    submittedForm.delete("expiresAt");
+  }
+
+  const backendUrl = normalizeApiBaseUrl(
+    process.env.BACKEND_API_URL ?? process.env.NEXT_PUBLIC_API_URL,
+  );
+  try {
+    const response = await fetch(`${backendUrl}/Customer/UploadKycDocument`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+      body: submittedForm,
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    });
+    const responseText = await response.text();
+    if (!responseText) {
+      return new Response(null, {
+        status: response.status,
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
+    let responseBody: unknown = responseText;
+    try {
+      responseBody = JSON.parse(responseText) as unknown;
+    } catch {
+      if (response.ok) {
+        return NextResponse.json(
+          { error: "The KYC upload endpoint returned invalid JSON." },
+          { status: 502 },
+        );
+      }
+    }
+
+    return NextResponse.json(responseBody, {
+      status: response.status,
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (error: unknown) {
+    console.error("Customer KYC document upload proxy request failed:", error);
+    return NextResponse.json(
+      { error: "Unable to reach the backend to upload the KYC document." },
+      { status: 502 },
+    );
+  }
+}

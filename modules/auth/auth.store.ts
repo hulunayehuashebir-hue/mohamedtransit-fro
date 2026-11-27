@@ -22,6 +22,7 @@ import {
   logout,
   resetPassword,
   resetPasswordFromEmail,
+  SignupRequestError,
   signup,
   updateAccountProfile,
 } from "./auth.endpoint";
@@ -49,6 +50,16 @@ const getErrorMessage = (error: unknown, fallback: string): string => {
     if (isRecord(firstError)) {
       const message = firstError.message;
       if (typeof message === "string" && message.trim()) return message.trim();
+    }
+    if (isRecord(errors)) {
+      for (const fieldErrors of Object.values(errors)) {
+        if (Array.isArray(fieldErrors)) {
+          const message = fieldErrors.find(
+            (item): item is string => typeof item === "string" && Boolean(item.trim()),
+          );
+          if (message) return message.trim();
+        }
+      }
     }
     if (typeof data?.message === "string" && data.message.trim()) {
       return data.message.trim();
@@ -293,10 +304,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       const token =
         (userPayload?.token as string | undefined) ||
         (userPayload?.accessToken as string | undefined) ||
-        (userPayload?.refreshToken as string | undefined) ||
         (unwrappedResponse?.token as string | undefined) ||
         (unwrappedResponse?.accessToken as string | undefined) ||
-        (unwrappedResponse?.refreshToken as string | undefined) ||
         "";
 
       const refreshToken =
@@ -431,6 +440,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       await signup(data);
       set({ loading: false, error: null });
     } catch (error: unknown) {
+      if (error instanceof SignupRequestError) {
+        set({ loading: false, error: error.message });
+        throw error;
+      }
       const message = getErrorMessage(error, "Sign up failed.");
       set({ loading: false, error: message });
       throw new Error(message);

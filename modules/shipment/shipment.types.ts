@@ -5,6 +5,7 @@ export type ShipmentPayload = Record<string, unknown>;
 export interface ShipmentServiceStageUpdatePayload {
   stageExecutionId?: string | number | null;
   shipmentStageId?: string | number | null;
+  workflowStageId?: string | number | null;
   shipmentId?: string | number | null;
   userId?: string | number | null;
   UserId?: string | number | null;

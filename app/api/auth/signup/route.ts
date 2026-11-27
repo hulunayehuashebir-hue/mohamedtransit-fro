@@ -6,6 +6,28 @@ const backendBaseUrl = normalizeApiBaseUrl(
     process.env.NEXT_PUBLIC_API_URL,
 );
 
+const forwardSignupResponse = async (response: Response): Promise<Response> => {
+  if (response.status === 409) {
+    return Response.json(
+      { code: "ACCOUNT_ALREADY_EXISTS" },
+      { status: 409, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  if (response.status >= 500) {
+    return Response.json(
+      { code: "SIGNUP_SERVICE_UNAVAILABLE" },
+      { status: response.status, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  const responseText = await response.text();
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  const contentType = response.headers.get("content-type");
+  if (contentType) headers.set("Content-Type", contentType);
+
+  return new Response(responseText, { status: response.status, headers });
+};
+
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") ?? "";
 
@@ -25,19 +47,7 @@ export async function POST(request: Request) {
         signal: AbortSignal.timeout(15_000),
       });
 
-      const responseText = await response.text();
-      const headers = new Headers({
-        "Cache-Control": "no-store",
-      });
-      const contentTypeHeader = response.headers.get("content-type");
-      if (contentTypeHeader) {
-        headers.set("Content-Type", contentTypeHeader);
-      }
-
-      return new Response(responseText, {
-        status: response.status,
-        headers,
-      });
+      return forwardSignupResponse(response);
     }
 
     const rawBody = await request.text();
@@ -54,19 +64,7 @@ export async function POST(request: Request) {
       signal: AbortSignal.timeout(15_000),
     });
 
-    const responseText = await response.text();
-    const headers = new Headers({
-      "Cache-Control": "no-store",
-    });
-    const contentTypeHeader = response.headers.get("content-type");
-    if (contentTypeHeader) {
-      headers.set("Content-Type", contentTypeHeader);
-    }
-
-    return new Response(responseText, {
-      status: response.status,
-      headers,
-    });
+    return forwardSignupResponse(response);
   } catch (error: unknown) {
     console.error("User signup proxy request failed:", error);
     return Response.json(

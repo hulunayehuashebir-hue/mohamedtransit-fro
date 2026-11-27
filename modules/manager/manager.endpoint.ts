@@ -3,15 +3,17 @@ import { API_ROUTES } from "@/modules/api";
 import { shipmentEndpoints } from "@/modules/shipment/shipment.endpoint";
 import type {
   ManagerAddStageDiscussionRequest,
+  ManagerAssessorAssignmentRequest,
   ManagerCustomerQuery,
   ManagerEscalateServiceRequest,
   ManagerExecutorAssignmentRequest,
+  ManagerImporterMessageRequest,
   ManagerNotificationQuery,
   ManagerNotifyImporterRequest,
   ManagerServiceQuery,
+  ManagerStageWorkspaceUpdateRequest,
 } from "./manager.type";
 import type {
-  ShipmentDocumentPayload,
   ShipmentParams,
   ShipmentPayload,
   ShipmentServiceStageUpdatePayload,
@@ -25,6 +27,7 @@ const stageStatusValues: Record<string, number> = {
   completed: 4,
   blocked: 5,
   needsreview: 6,
+  requirescustomeraction: 7,
 };
 
 const readPositiveIntegerId = (value: string | number | null | undefined, fieldName: string): number => {
@@ -46,12 +49,16 @@ export const ManagerEndpoints = {
   getReportsAnalytics: () => service.get(API_ROUTES.manager.getReportsAnalytics),
   createShipment: (payload: ShipmentPayload) => shipmentEndpoints.create(payload),
   assignExecutor: (payload: ManagerExecutorAssignmentRequest) => {
-    const shipmentId = readPositiveIntegerId(payload.shipmentId, "shipment ID");
+    const serviceId = readPositiveIntegerId(payload.shipmentId, "service ID");
     const caseExecutorId = readPositiveIntegerId(payload.caseExecutorId, "case executor ID");
-    return shipmentEndpoints.assign({
-      shipmentId,
-      caseExecutorId,
+    return service.post(API_ROUTES.manager.assignServiceExecutor(serviceId), {
+      userId: caseExecutorId,
     });
+  },
+  assignAssessor: (payload: ManagerAssessorAssignmentRequest) => {
+    const serviceId = readPositiveIntegerId(payload.serviceId, "service ID");
+    const userId = readPositiveIntegerId(payload.userId, "assessor ID");
+    return service.post(API_ROUTES.manager.assignServiceAssessor(serviceId), { userId });
   },
   updateShipment: (payload: ShipmentPayload) => shipmentEndpoints.update(payload),
   updateShipmentStatus: (
@@ -62,32 +69,29 @@ export const ManagerEndpoints = {
     shipmentEndpoints.createStageTransport(payload),
   updateStageTransport: (payload: StageTransportUpdatePayload) =>
     shipmentEndpoints.updateStageTransport(payload),
-  updateServiceStage: (payload: ShipmentServiceStageUpdatePayload) => {
-    const rawStatus = payload.status;
-    const normalizedStatus = typeof rawStatus === "string"
-      ? rawStatus.toLowerCase().replaceAll(/[\s_-]+/g, "")
-      : "";
-    const status = typeof rawStatus === "number"
-      ? rawStatus
-      : stageStatusValues[normalizedStatus];
-
-    if (status === undefined || !Number.isInteger(status) || status < 1 || status > 6) {
+  updateServiceStage: (payload: ManagerStageWorkspaceUpdateRequest) => {
+    const serviceId = readPositiveIntegerId(payload.serviceId, "service ID");
+    const stageId = readPositiveIntegerId(payload.stageId, "workflow stage ID");
+    const acceptedStatuses = new Set([
+      "notstarted",
+      "inprogress",
+      "needsreview",
+      "requirescustomeraction",
+      "completed",
+      "blocked",
+    ]);
+    if (!acceptedStatuses.has(payload.stageStatus.toLowerCase().replaceAll(/[\s_-]+/g, ""))) {
       throw new Error("Select a valid workflow stage status before saving.");
     }
+    if (!["draft", "advance", "block"].includes(payload.action)) {
+      throw new Error("Select a valid workflow stage action before saving.");
+    }
 
-    const shipmentId = readPositiveIntegerId(payload.shipmentId, "service ID");
-    const stageExecutionId = readPositiveIntegerId(
-      payload.stageExecutionId ?? payload.shipmentStageId,
-      "stage ID",
-    );
-    return service.put(API_ROUTES.shipment.updateServiceStage, {
-      shipmentId,
-      shipmentStageId: stageExecutionId,
-      status,
-      notes: typeof payload.notes === "string" ? payload.notes : null,
-      ...(payload.riskLevel === undefined || payload.riskLevel === null
-        ? {}
-        : { riskLevel: payload.riskLevel }),
+    return service.post(API_ROUTES.manager.updateServiceStage(serviceId, stageId), {
+      action: payload.action,
+      stageStatus: payload.stageStatus,
+      riskChannel: payload.riskChannel,
+      stageNote: payload.stageNote,
     });
   },
   updateStageStatus: (payload: ShipmentServiceStageUpdatePayload) => {
@@ -120,7 +124,7 @@ export const ManagerEndpoints = {
   },
   getServiceById: (id: string | number) => {
     const serviceId = readPositiveIntegerId(id, "service ID");
-    return service.get(API_ROUTES.manager.getServiceById(serviceId));
+    return service.get(API_ROUTES.manager.serviceWorkspace(serviceId));
   },
   getStageDocuments: (serviceId: string | number, stageId: string | number) => {
     const validServiceId = readPositiveIntegerId(serviceId, "service ID");
@@ -132,9 +136,7 @@ export const ManagerEndpoints = {
   getStageDiscussions: (stageId: number, serviceId: number) => {
     const validServiceId = readPositiveIntegerId(serviceId, "service ID");
     const validStageId = readPositiveIntegerId(stageId, "stage ID");
-    return service.get(API_ROUTES.manager.getStageDiscussions, {
-      params: { serviceId: validServiceId, stageId: validStageId },
-    });
+    return service.get(API_ROUTES.manager.serviceDiscussions(validServiceId, validStageId));
   },
   addStageDiscussion: (payload: ManagerAddStageDiscussionRequest) => {
     const serviceId = readPositiveIntegerId(payload.serviceId, "service ID");
@@ -143,10 +145,8 @@ export const ManagerEndpoints = {
     if (!comment) {
       throw new Error("A discussion message is required.");
     }
-    return service.post(API_ROUTES.manager.addStageDiscussion, {
-      serviceId,
-      stageId,
-      comment,
+    return service.post(API_ROUTES.manager.serviceDiscussions(serviceId, stageId), {
+      message: comment,
     });
   },
   notifyImporter: (payload: ManagerNotifyImporterRequest) => {
@@ -156,11 +156,21 @@ export const ManagerEndpoints = {
     if (!message) {
       throw new Error("A notification message is required.");
     }
-    return service.post(API_ROUTES.manager.notifyImporter, {
-      serviceId,
+    return service.post(API_ROUTES.manager.workspaceNotifyImporter(serviceId), {
       subject,
       message,
-      isUrgent: payload.isUrgent ?? false,
+    });
+  },
+  messageImporter: (payload: ManagerImporterMessageRequest) => {
+    const serviceId = readPositiveIntegerId(payload.serviceId, "service ID");
+    const subject = payload.subject?.trim() || "Service message";
+    const message = payload.message.trim();
+    if (!message) {
+      throw new Error("A message to the importer is required.");
+    }
+    return service.post(API_ROUTES.manager.messageServiceImporter(serviceId), {
+      subject,
+      message,
     });
   },
   escalateService: (payload: ManagerEscalateServiceRequest) => {
@@ -169,9 +179,9 @@ export const ManagerEndpoints = {
     if (!reason) {
       throw new Error("An escalation reason is required.");
     }
-    return service.post(API_ROUTES.manager.escalateService, {
-      serviceId,
+    return service.post(API_ROUTES.manager.workspaceEscalateService(serviceId), {
       reason,
+      priority: "High",
     });
   },
   getServiceActivities: (id: string | number) => {
@@ -184,8 +194,6 @@ export const ManagerEndpoints = {
   },
   getServiceStages: (id: string | number) =>
     shipmentEndpoints.getStages({ shipmentId: readPositiveIntegerId(id, "service ID") }),
-  uploadServiceDocument: (payload: ShipmentDocumentPayload) =>
-    shipmentEndpoints.uploadDocument(payload),
   getAllShipments: (params?: ShipmentParams) => shipmentEndpoints.getAll(params),
   getShipmentById: (id: string | number) => {
     const shipmentId = readPositiveIntegerId(id, "service ID");
@@ -202,7 +210,52 @@ export const ManagerEndpoints = {
   getAllServices: (params?: ManagerServiceQuery) =>
     service.get(API_ROUTES.manager.getAllServices, { params }),
   getAllStaff: () =>
-    service.get(API_ROUTES.manager.getAllStaff),
+    service.get(API_ROUTES.manager.getAvailableStaff),
+  uploadServiceDocument: (
+    payload: FormData,
+    onProgress?: (progress: number) => void,
+  ) => {
+    const serviceId = readPositiveIntegerId(
+      String(payload.get("ServiceId") ?? payload.get("ShipmentId") ?? payload.get("serviceId") ?? ""),
+      "service ID",
+    );
+    const stageId = readPositiveIntegerId(
+      String(payload.get("WorkflowStageId") ?? payload.get("StageId") ?? payload.get("stageId") ?? ""),
+      "workflow stage ID",
+    );
+    const file = payload.get("File") ?? payload.get("file");
+    const documentType = payload.get("DocumentType") ?? payload.get("documentType");
+    if (!(file instanceof File)) {
+      throw new Error("Choose a file to upload.");
+    }
+    if (typeof documentType !== "string" || !documentType.trim()) {
+      throw new Error("Select a document type before uploading.");
+    }
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    formData.append("documentType", documentType.trim());
+    return service.post(
+      API_ROUTES.manager.uploadStageDocument(serviceId, stageId),
+      formData,
+      {
+        onUploadProgress: (event) => {
+          if (event.total) onProgress?.(Math.round((event.loaded / event.total) * 100));
+        },
+      },
+    );
+  },
+  downloadServiceDocument: (
+    serviceId: string | number,
+    stageId: string | number,
+    documentId: string | number,
+  ) => service.get(
+    API_ROUTES.manager.downloadStageDocument(
+      readPositiveIntegerId(serviceId, "service ID"),
+      readPositiveIntegerId(stageId, "workflow stage ID"),
+      readPositiveIntegerId(documentId, "document ID"),
+    ),
+    { responseType: "blob" },
+  ),
   getStaffById: (id: string | number) =>
     service.get(API_ROUTES.auth.user.getById(id)),
   getNotifications: (params?: ManagerNotificationQuery) =>

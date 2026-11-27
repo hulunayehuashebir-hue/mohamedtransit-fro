@@ -23,8 +23,13 @@ const normalizeDocumentRecord = (value: unknown): DocumentRecord | null => {
     const key = Object.keys(value).find((candidate) => nameSet.has(candidate.toLowerCase()));
     return key ? value[key] : undefined;
   };
-  const id = String(readField("id", "documentId", "fileId") ?? "");
-  if (!id) return null;
+  const backendId = String(readField("id", "documentId", "fileId") ?? "");
+  if (!backendId) return null;
+  const sourceValue = readField("source", "documentSource", "kind");
+  const source = sourceValue == null ? undefined : String(sourceValue);
+  const id = source?.toLowerCase() === "customerkyc"
+    ? `customer-kyc-${backendId}`
+    : backendId;
 
   const fileName = readField("originalFileName", "fileName", "name", "documentName", "title") ?? "Untitled document";
   const rawType = readField("type", "documentType", "category");
@@ -79,6 +84,8 @@ const normalizeDocumentRecord = (value: unknown): DocumentRecord | null => {
 
   return {
     id,
+    backendId,
+    ...(source ? { source } : {}),
     name: String(fileName),
     type: String(type),
     serviceId: String(serviceId),
@@ -270,29 +277,42 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
 
   verifyDocumentById: async (payload) => {
     const requestedId = payload.documentId ?? payload.id;
-    const documentId = Number(requestedId);
+    const record = get().documents.find((document) => document.id === String(requestedId));
+    const backendId = record?.backendId ?? String(requestedId ?? "");
+    const documentId = Number(backendId);
     if (!Number.isSafeInteger(documentId) || documentId <= 0) {
       throw new Error("A valid numeric document ID is required for verification.");
     }
+    const isCustomerKyc = record?.source?.toLowerCase() === "customerkyc";
     const verifiedByUserId = Number(
       payload.verifiedByUserId ?? useAuthStore.getState().user?.id,
     );
-    if (!Number.isSafeInteger(verifiedByUserId) || verifiedByUserId <= 0) {
+    if (!isCustomerKyc && (!Number.isSafeInteger(verifiedByUserId) || verifiedByUserId <= 0)) {
       throw new Error("Your account ID is unavailable. Sign in again before verifying documents.");
     }
 
     set({ loading: true, error: null });
     try {
       const verificationNotes = payload.verificationNotes ?? payload.notes ?? "Verified by assessor";
-      await verifyDocument({
-        documentId,
-        isVerified: payload.isVerified ?? true,
-        verificationNotes,
-        verifiedByUserId,
-      });
-      const id = String(documentId);
+      const isVerified = payload.isVerified ?? true;
+      if (isCustomerKyc) {
+        await AssessorEndpoints.verifyCustomerDocument({
+          documentId,
+          isVerified,
+          decision: isVerified ? "Verified" : "Rejected",
+          notes: verificationNotes,
+        });
+      } else {
+        await verifyDocument({
+          documentId,
+          isVerified,
+          verificationNotes,
+          verifiedByUserId,
+        });
+      }
+      const id = record?.id ?? String(documentId);
       const notes = verificationNotes.trim().toLowerCase();
-      const status: DocumentRecord["status"] = payload.isVerified ?? true
+      const status: DocumentRecord["status"] = isVerified
         ? "Verified"
         : notes.startsWith("flagged:")
           ? "Flagged"
@@ -346,7 +366,14 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
   downloadFile: async (documentId) => {
     set({ loading: true, error: null });
     try {
-      const response = await downloadDocument(documentId);
+      const record = get().documents.find((document) => document.id === String(documentId));
+      const backendId = Number(record?.backendId ?? documentId);
+      if (!Number.isSafeInteger(backendId) || backendId <= 0) {
+        throw new Error("A valid numeric document ID is required for download.");
+      }
+      const response = record?.source?.toLowerCase() === "customerkyc"
+        ? await AssessorEndpoints.downloadCustomerDocument(backendId)
+        : await downloadDocument(backendId);
       set({ loading: false });
       return response;
     } catch (err: unknown) {

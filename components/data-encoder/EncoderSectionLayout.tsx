@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -17,6 +17,13 @@ import {
 	UsersRound,
 } from "lucide-react";
 import EncoderRoleSwitcher from "@/components/data-encoder/EncoderRoleSwitcher";
+import { getDataEncoderNavigationCopy } from "@/features/services/service.copy";
+import { useMessagingStore } from "@/modules/message/message.store";
+import useAuthStore from "@/modules/auth/auth.store";
+import {
+	ENCODER_DRAFTS_UPDATED_EVENT,
+	getEncoderServiceDrafts,
+} from "@/modules/dataencoder/data-encoder.drafts";
 
 export type EncoderSection = "dashboard" | "create-customer" | "customers" | "create-service" | "services" | "draft-services" | "documents" | "bulk-upload" | "templates" | "profile" | "messages" | "notifications";
 
@@ -85,7 +92,7 @@ const navigation: {
 	},
 	{
 		id: "templates",
-		label: "Service document library",
+		label: "Document Templates",
 		href: (base) => `${base}/templates`,
 		icon: FileDown,
 	},
@@ -121,8 +128,91 @@ export default function EncoderSectionLayout({
 	const firstSegment = pathname.split("/").filter(Boolean)[0];
 	const locale = firstSegment === "am" || firstSegment === "en" ? firstSegment : "en";
 	const base = `/${locale}/admin/data-encoder`;
+	const copy = getDataEncoderNavigationCopy(locale);
 	const [collapsed, setCollapsed] = useState(false);
 	const [mobileOpen, setMobileOpen] = useState(false);
+	const [draftCount, setDraftCount] = useState(0);
+	const unreadCount = useMessagingStore((state) => state.unreadCount);
+	const fetchUnreadCount = useMessagingStore((state) => state.fetchUnreadCount);
+	const userId = useAuthStore((state) => state.user?.id);
+
+	useEffect(() => {
+		const refreshDraftCount = () => {
+			try {
+				setDraftCount(getEncoderServiceDrafts().length);
+			} catch (error: unknown) {
+				console.error("Unable to read saved Data Encoder drafts for navigation.", error);
+			}
+		};
+		refreshDraftCount();
+		window.addEventListener("storage", refreshDraftCount);
+		window.addEventListener(ENCODER_DRAFTS_UPDATED_EVENT, refreshDraftCount);
+		return () => {
+			window.removeEventListener("storage", refreshDraftCount);
+			window.removeEventListener(ENCODER_DRAFTS_UPDATED_EVENT, refreshDraftCount);
+		};
+	}, []);
+
+	useEffect(() => {
+		if (userId !== undefined && userId !== null && userId !== "") {
+			void fetchUnreadCount();
+		}
+	}, [fetchUnreadCount, userId]);
+
+	const localizedNavigation = navigation.map((item) => ({
+		...item,
+		label: copy[
+			({
+				"dashboard": "dashboard",
+				"draft-services": "draftServices",
+				"create-customer": "createCustomer",
+				"customers": "customerList",
+				"create-service": "createService",
+				"services": "services",
+				"documents": "documents",
+				"bulk-upload": "bulkUpload",
+				"templates": "documentTemplates",
+				"messages": "messages",
+				"notifications": "notifications",
+				"profile": "profile",
+			} as const)[item.id]
+		],
+	}));
+	const renderNavigationItem = ({
+		id,
+		label,
+		href,
+		icon: Icon,
+	}: (typeof localizedNavigation)[number]) => {
+		const badgeCount = id === "draft-services"
+			? draftCount
+			: id === "messages"
+				? unreadCount
+				: 0;
+		const hasBadge = id === "draft-services" || id === "messages";
+		return (
+			<Link
+				key={id}
+				href={href(base)}
+				aria-current={activeSection === id ? "page" : undefined}
+				title={collapsed ? label : undefined}
+				onClick={() => setMobileOpen(false)}
+				className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
+					activeSection === id
+						? "bg-blue-600 text-white shadow-sm"
+						: "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+				}`}
+			>
+				<Icon className={`h-[19px] w-[19px] shrink-0 ${activeSection === id ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
+				{!collapsed && <span className="min-w-0 flex-1 truncate">{label}</span>}
+				{hasBadge && (
+					<span className={`inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[11px] font-semibold ${activeSection === id ? "bg-white/20 text-white" : "bg-blue-100 text-blue-700"}`}>
+						{badgeCount > 99 ? "99+" : badgeCount}
+					</span>
+				)}
+			</Link>
+		);
+	};
 
 	return (
 		<div className="min-h-screen bg-slate-50">
@@ -162,114 +252,28 @@ export default function EncoderSectionLayout({
 				</div>
 				<nav aria-label="Data Encoder navigation" className="flex-1 overflow-y-auto px-3 py-5">
 					<p className={`mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 ${collapsed ? "sr-only" : ""}`}>
-						Overview
+						{copy.overview}
 					</p>
 					<div className="space-y-1">
-						{navigation.slice(0, 2).map(({ id, label, href, icon: Icon }) => (
-							<Link
-								key={id}
-								href={href(base)}
-								aria-current={activeSection === id ? "page" : undefined}
-								title={collapsed ? label : undefined}
-								onClick={() => setMobileOpen(false)}
-								className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
-									activeSection === id
-										? "bg-blue-600 text-white shadow-sm"
-										: "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-								}`}
-							>
-								<Icon className={`h-[19px] w-[19px] shrink-0 ${activeSection === id ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
-								{!collapsed && <span className="truncate">{label}</span>}
-							</Link>
-						))}
+						{localizedNavigation.slice(0, 2).map(renderNavigationItem)}
 					</div>
 					<p className={`mb-2 mt-7 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 ${collapsed ? "sr-only" : ""}`}>
-						Data Entry
+						{copy.dataEntry}
 					</p>
 					<div className="space-y-1">
-						{navigation.slice(2, 6).map(({ id, label, href, icon: Icon }) => (
-							<Link
-								key={id}
-								href={href(base)}
-								aria-current={activeSection === id ? "page" : undefined}
-								title={collapsed ? label : undefined}
-								onClick={() => setMobileOpen(false)}
-								className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
-									activeSection === id
-										? "bg-blue-600 text-white shadow-sm"
-										: "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-								}`}
-							>
-								<Icon className={`h-[19px] w-[19px] shrink-0 ${activeSection === id ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
-								{!collapsed && <span className="truncate">{label}</span>}
-							</Link>
-						))}
+						{localizedNavigation.slice(2, 6).map(renderNavigationItem)}
 					</div>
 					<p className={`mb-2 mt-7 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 ${collapsed ? "sr-only" : ""}`}>
-						Documents
+						{copy.documents}
 					</p>
 					<div className="space-y-1">
-						{navigation.slice(6, 9).map(({ id, label, href, icon: Icon }) => (
-							<Link
-								key={id}
-								href={href(base)}
-								aria-current={activeSection === id ? "page" : undefined}
-								title={collapsed ? label : undefined}
-								onClick={() => setMobileOpen(false)}
-								className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
-									activeSection === id
-										? "bg-blue-600 text-white shadow-sm"
-										: "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-								}`}
-							>
-								<Icon className={`h-[19px] w-[19px] shrink-0 ${activeSection === id ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
-								{!collapsed && <span className="truncate">{label}</span>}
-							</Link>
-						))}
+						{localizedNavigation.slice(6, 9).map(renderNavigationItem)}
 					</div>
 					<p className={`mb-2 mt-7 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 ${collapsed ? "sr-only" : ""}`}>
-						Communication
+						{copy.communication}
 					</p>
 					<div className="space-y-1">
-						{navigation.slice(9, 11).map(({ id, label, href, icon: Icon }) => (
-							<Link
-								key={id}
-								href={href(base)}
-								aria-current={activeSection === id ? "page" : undefined}
-								title={collapsed ? label : undefined}
-								onClick={() => setMobileOpen(false)}
-								className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
-									activeSection === id
-											? "bg-blue-600 text-white shadow-sm"
-											: "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-								}`}
-							>
-									<Icon className={`h-[19px] w-[19px] shrink-0 ${activeSection === id ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
-								{!collapsed && <span className="truncate">{label}</span>}
-							</Link>
-						))}
-					</div>
-					<p className={`mb-2 mt-7 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 ${collapsed ? "sr-only" : ""}`}>
-						Account
-					</p>
-					<div className="space-y-1">
-						{navigation.slice(11).map(({ id, label, href, icon: Icon }) => (
-							<Link
-								key={id}
-								href={href(base)}
-								aria-current={activeSection === id ? "page" : undefined}
-								title={collapsed ? label : undefined}
-								onClick={() => setMobileOpen(false)}
-								className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
-									activeSection === id
-										? "bg-blue-600 text-white shadow-sm"
-										: "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-								}`}
-							>
-								<Icon className={`h-[19px] w-[19px] shrink-0 ${activeSection === id ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
-								{!collapsed && <span className="truncate">{label}</span>}
-							</Link>
-						))}
+						{localizedNavigation.slice(9).map(renderNavigationItem)}
 					</div>
 				</nav>
 				<div className="border-t border-slate-200 p-3">

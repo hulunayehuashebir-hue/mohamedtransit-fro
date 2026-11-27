@@ -13,7 +13,12 @@ import PhoneInput from "react-phone-input-2";
 import "react-phone-input-2/lib/style.css";
 
 import useAuthStore from "@/modules/auth/auth.store";
+import { SignupRequestError } from "@/modules/auth/auth.endpoint";
 import { registerCustomer } from "@/modules/customer/customer.endpoint";
+import {
+  deleteTokensClient,
+  getTokenClient,
+} from "@/modules/utils/token/client-token.storage";
 
 const signupSchema = z.object({
   firstName: z.string().min(2, "ስም ቢያንስ 2 ፊደላት ሊኖሩት ይገባል / First name is too short"),
@@ -41,6 +46,45 @@ const signupSchema = z.object({
 type SignupFormData = z.infer<typeof signupSchema>;
 type FieldIcon = typeof User;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const getBackendErrorMessage = (error: unknown): string => {
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (isRecord(error)) {
+    const response = isRecord(error.response) ? error.response : undefined;
+    const data = isRecord(response?.data) ? response.data : undefined;
+    if (data) {
+      const errors = data.errors;
+      if (Array.isArray(errors)) {
+        const firstError = errors.find((item) => typeof item === "string" && item.trim());
+        if (typeof firstError === "string") return firstError.trim();
+        const firstErrorRecord = errors.find(isRecord);
+        if (firstErrorRecord) {
+          const message = firstErrorRecord.message;
+          if (typeof message === "string" && message.trim()) return message.trim();
+        }
+      } else if (isRecord(errors)) {
+        for (const fieldErrors of Object.values(errors)) {
+          if (Array.isArray(fieldErrors)) {
+            const message = fieldErrors.find(
+              (item): item is string => typeof item === "string" && Boolean(item.trim()),
+            );
+            if (message) return message.trim();
+          }
+        }
+      }
+
+      const message = [data.message, data.detail, data.error, data.title].find(
+        (value): value is string => typeof value === "string" && Boolean(value.trim()),
+      );
+      if (message) return message.trim();
+    }
+  }
+
+  return error instanceof Error ? error.message.trim() : "";
+};
+
 function Label({ children, optional = false }: { children: React.ReactNode; optional?: boolean }) {
   return <span className="mb-2 flex items-center gap-1 text-[11px] font-bold uppercase tracking-[0.14em] text-slate-600">{children}{!optional && <span className="text-cyan-600">*</span>}</span>;
 }
@@ -56,6 +100,7 @@ export default function SignUpPage() {
   const isAm = lang === "am";
   const { signUp, login, loading, error: storeError } = useAuthStore();
   const [localError, setLocalError] = useState<string | null>(null);
+  const [accountConflict, setAccountConflict] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [accountCreated, setAccountCreated] = useState(false);
 
@@ -84,6 +129,7 @@ export default function SignUpPage() {
 
   const onSubmit = async (data: SignupFormData) => {
     setLocalError(null);
+    setAccountConflict(false);
     try {
       if (!accountCreated) {
         const accountPayload = new FormData();
@@ -103,10 +149,22 @@ export default function SignUpPage() {
 
       let registeredUser: Awaited<ReturnType<typeof login>>;
       try {
+        deleteTokensClient();
         registeredUser = await login({ username: data.username, password: data.password });
-      } catch (loginError: unknown) {
-        const detail = loginError instanceof Error ? ` ${loginError.message}` : "";
-        throw new Error(`Your account was created, but automatic sign-in failed.${detail}`);
+      } catch {
+        throw new Error(
+          isAm
+            ? "አካውንቱ ተፈጥሯል፣ ግን በራስ-ሰር መግባት አልተቻለም። እባክዎ ይግቡ።"
+            : "Your account was created, but automatic sign-in failed. Please sign in.",
+        );
+      }
+      const accessToken = getTokenClient();
+      if (!accessToken) {
+        throw new Error(
+          isAm
+            ? "አካውንቱ ተፈጥሯል፣ ግን የመግቢያ ቶከን አልተገኘም። እባክዎ ይግቡ።"
+            : "Your account was created, but sign-in credentials were unavailable. Please sign in.",
+        );
       }
 
       const rawUserId = registeredUser.userId ?? registeredUser.id;
@@ -121,26 +179,67 @@ export default function SignUpPage() {
           ? numericUserId
           : undefined;
 
-      await registerCustomer({
-        role: "Customer",
-        businessName: data.businessName,
-        tinNumber: data.tinNumber,
-        businessLicense: data.businessLicense,
-        businessAddress: data.businessAddress,
-        city: data.city,
-        state: data.state,
-        postalCode: data.postalCode,
-        contactPerson: `${data.firstName} ${data.lastName}`.trim(),
-        contactPhone: data.phonenumber,
-        contactEmail: data.email,
-        businessType: data.businessType,
-        importLicense: data.importLicense,
-        ...(data.importLicenseExpiry ? { importLicenseExpiry: data.importLicenseExpiry } : {}),
-        ...(userId !== undefined ? { userId } : {}),
-      });
+      try {
+        await registerCustomer({
+          role: "Customer",
+          businessName: data.businessName,
+          tinNumber: data.tinNumber,
+          businessLicense: data.businessLicense,
+          businessAddress: data.businessAddress,
+          city: data.city,
+          state: data.state,
+          postalCode: data.postalCode,
+          contactPerson: `${data.firstName} ${data.lastName}`.trim(),
+          contactPhone: data.phonenumber,
+          contactEmail: data.email,
+          businessType: data.businessType,
+          importLicense: data.importLicense,
+          ...(data.importLicenseExpiry ? { importLicenseExpiry: data.importLicenseExpiry } : {}),
+          ...(userId !== undefined ? { userId } : {}),
+        }, accessToken);
+      } catch (error: unknown) {
+        if (/already registered|customer (?:profile )?already exists/i.test(getBackendErrorMessage(error))) {
+          router.push(`/${lang}/customer/dashboard`);
+          return;
+        }
+        throw error;
+      }
       router.push(`/${lang}/customer/dashboard`);
     } catch (error: unknown) {
-      setLocalError(error instanceof Error ? error.message : (isAm ? "ምዝገባው አልተሳካም።" : "Registration failed."));
+      if (error instanceof SignupRequestError) {
+        const isAccountConflict = error.code === "ACCOUNT_ALREADY_EXISTS";
+        setAccountConflict(isAccountConflict);
+        setLocalError(
+          isAccountConflict
+            ? isAm
+              ? "በዚህ ኢሜይል ወይም የተጠቃሚ ስም አካውንት አስቀድሞ አለ።"
+              : "An account with this email or username already exists."
+            : isAm
+              ? "ምዝገባው አሁን ለጊዜው አይገኝም። እባክዎ ቆይተው እንደገና ይሞክሩ።"
+              : "Signup is temporarily unavailable. Please try again later.",
+        );
+        return;
+      }
+
+      const errorMessage = getBackendErrorMessage(error);
+      const hasServerFailure =
+        typeof error === "object" &&
+        error !== null &&
+        "response" in error &&
+        typeof error.response === "object" &&
+        error.response !== null &&
+        "status" in error.response &&
+        typeof error.response.status === "number" &&
+        error.response.status >= 500;
+      const containsTechnicalDetails =
+        /smtp|5\.\d\.\d|username and password not accepted|stack trace/i.test(errorMessage);
+      setLocalError(
+        hasServerFailure || containsTechnicalDetails
+          ? isAm
+            ? "ምዝገባው አሁን ለጊዜው አይገኝም። እባክዎ ቆይተው እንደገና ይሞክሩ።"
+            : "Signup is temporarily unavailable. Please try again later."
+          : errorMessage || (isAm ? "ምዝገባው አልተሳካም።" : "Registration failed."),
+      );
     }
   };
 
@@ -169,7 +268,25 @@ export default function SignUpPage() {
       <section className="px-5 py-7 sm:px-10 sm:py-10 lg:px-12 xl:px-16">
         <div className="mb-8 flex justify-end"><Link href={`/${lang}/auth/login`} className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 transition hover:text-cyan-700"><ArrowLeft className="h-3.5 w-3.5" />{isAm ? "ወደ መግቢያ" : "Back to sign in"}</Link></div>
         <div className="mb-8 max-w-xl"><div className="mb-4 inline-flex items-center gap-2 rounded-full bg-cyan-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-cyan-700"><span className="h-1.5 w-1.5 rounded-full bg-cyan-500" />{isAm ? "የተጠቃሚ ምዝገባ" : "Account registration"}</div><h2 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">{isAm ? "አዲስ አካውንት ይፍጠሩ" : "Create your account"}</h2><p className="mt-3 text-sm leading-6 text-slate-500">{isAm ? "የእርስዎን መረጃ ያስገቡ።" : "Set up your secure profile. It only takes a few minutes to get started."}</p></div>
-        {(localError || storeError) && <div className="mb-6"><Alert message={localError || storeError} type="error" showIcon closable /></div>}
+        {(localError || storeError) && (
+          <div className="mb-6">
+            <Alert
+              title={localError || storeError}
+              description={
+                accountConflict ? (
+                  isAm ? (
+                    <>አስቀድሞ አካውንት ካለዎት <Link href={`/${lang}/auth/login`} className="font-semibold underline">ይግቡ</Link>።</>
+                  ) : (
+                    <>Already have an account? <Link href={`/${lang}/auth/login`} className="font-semibold underline">Sign in</Link>.</>
+                  )
+                ) : undefined
+              }
+              type="error"
+              showIcon
+              closable
+            />
+          </div>
+        )}
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-7">
           <section><div className="mb-4 flex items-center gap-3"><span className="text-xs font-bold tracking-[0.16em] text-slate-400">01</span><h3 className="text-sm font-bold text-slate-800">{isAm ? "የግል መረጃ" : "Personal information"}</h3><span className="h-px flex-1 bg-slate-100" /></div><div className="grid gap-4 sm:grid-cols-2"><div><Label>{isAm ? "ስም" : "First name"}</Label>{input("firstName", User, isAm ? "ስምዎን ያስገቡ" : "Your first name")}<ErrorText message={errors.firstName?.message} /></div><div><Label>{isAm ? "የአባት ስም" : "Last name"}</Label>{input("lastName", User, isAm ? "የአባት ስም" : "Your last name")}<ErrorText message={errors.lastName?.message} /></div></div></section>

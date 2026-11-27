@@ -52,6 +52,12 @@ export interface ServiceStageDecisionRequest {
   notes: string | null;
 }
 
+export interface UpdateAssessorRiskChannelRequest {
+  shipmentId: number;
+  riskChannel: "Green" | "Yellow" | "Blue" | "Red";
+  notes?: string | null;
+}
+
 export interface AssessorServiceStage {
   id: number;
   name: string;
@@ -221,13 +227,19 @@ export interface PendingCustomerApproval {
   documents?: Array<{
     id?: string | number;
     originalFileName?: string;
+    fileName?: string;
+    name?: string;
     documentType?: string | number;
+    type?: string | number;
     isRequired?: boolean;
     isVerified?: boolean;
     expiryDate?: string | null;
     verificationNotes?: string | null;
     createAt?: string;
     updatedAt?: string | null;
+    filePath?: string | null;
+    fileUrl?: string | null;
+    documentUrl?: string | null;
   }>;
   checklist?: Array<{
     id?: string | number;
@@ -266,6 +278,7 @@ export interface ApprovalChecklistItem {
   id: string;
   name: string;
   documentType: string;
+  fileUrl?: string;
   status: ApprovalStatus;
   isRequired: boolean;
   expiryDate: string | null;
@@ -307,6 +320,7 @@ export interface ApprovalCounts {
 export interface VerifyCustomerDocumentRequest {
   documentId: number;
   isVerified: boolean;
+  decision?: string;
   notes?: string;
 }
 

@@ -29,6 +29,8 @@ import { useAssessorStore } from "@/modules/assessor/assessor.store";
 import { useServiceReviewStore } from "@/features/service-reviews/serviceReview.store";
 import { AssessmentDecision } from "@/features/service-reviews/components/AssessmentDecision";
 import { StageEvidence } from "@/features/service-reviews/components/StageEvidence";
+import { useAuditStore } from "@/features/audit-logs/audit-logs-store";
+import { getAssessorCopy } from "@/modules/assessor/assessor.copy";
 import type {
   AssessorItem,
   AssessorServiceStage,
@@ -264,6 +266,11 @@ const formatChannel = (value: unknown): string => {
     ? labels[numeric]
     : readText(value) || "—";
 };
+
+const isRiskChannelValue = (
+  value: string,
+): value is "Green" | "Yellow" | "Blue" | "Red" =>
+  value === "Green" || value === "Yellow" || value === "Blue" || value === "Red";
 
 const formatMode = (value: unknown): string => {
   if (isRecord(value)) return formatMode(readField(value, "value", "id", "code", "name", "label", "mode"));
@@ -676,6 +683,7 @@ function ServiceDiscussion({
 
 export default function AssessorServiceDetailPage({ params }: PageProps) {
   const { lang, id } = use(params);
+  const copy = getAssessorCopy(lang).serviceReview;
   const serviceKey = id;
   const [serviceId, setServiceId] = useState<number | null>(null);
   const [service, setService] = useState<AssessorItem | null>(null);
@@ -687,6 +695,12 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
   const [stageDecisionPending, setStageDecisionPending] = useState<ServiceStageDecisionAction | null>(null);
   const [stageDecisionFeedback, setStageDecisionFeedback] = useState<string | null>(null);
   const [stageDecisionFeedbackError, setStageDecisionFeedbackError] = useState(false);
+  const [selectedRiskChannel, setSelectedRiskChannel] = useState<
+    "Green" | "Yellow" | "Blue" | "Red" | ""
+  >("");
+  const [riskChannelSaving, setRiskChannelSaving] = useState(false);
+  const [riskChannelFeedback, setRiskChannelFeedback] = useState<string | null>(null);
+  const [riskChannelFeedbackError, setRiskChannelFeedbackError] = useState(false);
   const [uploadingStageDocument, setUploadingStageDocument] = useState(false);
   const [stageUploadFeedback, setStageUploadFeedback] = useState<string | null>(null);
   const [stageUploadFeedbackError, setStageUploadFeedbackError] = useState(false);
@@ -700,6 +714,9 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
   const stageDiscussionsByKey = useAssessorStore((state) => state.stageDiscussionsByKey);
   const fetchDocuments = useServiceReviewStore((state) => state.fetchServiceDocuments);
   const fetchReviewCases = useServiceReviewStore((state) => state.fetchCases);
+  const updateRiskChannel = useAssessorStore((state) => state.updateRiskChannel);
+  const fetchDashboard = useAssessorStore((state) => state.fetchDashboard);
+  const fetchAssessmentLogs = useAuditStore((state) => state.fetchLogs);
   const serviceDocuments = useServiceReviewStore((state) =>
     serviceId ? state.serviceDocuments[String(serviceId)] : undefined,
   );
@@ -809,6 +826,10 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
       );
       setServiceId(numericId);
       setService(detail);
+      const currentRiskChannel = formatChannel(
+        readField(detail, "managerRiskChannel", "risk_channel", "riskLevel", "riskChannel", "channel"),
+      ).replace(/\s+channel$/i, "");
+      setSelectedRiskChannel(isRiskChannelValue(currentRiskChannel) ? currentRiskChannel : "");
       setConsignment({
         ...detail,
         ...(unwrapObject(readField(detail, "consignment", "consignmentDetails")) ?? {}),
@@ -884,7 +905,9 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
     ? display(service, "referenceNumber", "reference_number", "clientReference", "referenceNo", "secondaryReference", "serviceReference", "externalReference")
     : "—";
   const channel = service
-    ? formatChannel(readField(service, "risk_channel", "riskLevel", "riskChannel", "channel"))
+    ? selectedRiskChannel
+      ? `${selectedRiskChannel} channel`
+      : formatChannel(readField(service, "managerRiskChannel", "risk_channel", "riskLevel", "riskChannel", "channel"))
     : "—";
   const mode = workflowMode;
   const serviceTitle = service
@@ -1030,6 +1053,8 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
         fetchStages(serviceId),
         fetchStageDiscussions(serviceId, selectedStage.id),
         fetchReviewCases(),
+        fetchDashboard(),
+        fetchAssessmentLogs(),
       ]);
       if (refreshResults.some((result) => result.status === "rejected")) {
         setStageDecisionFeedback(`Stage ${actionLabel}, but some updated service data could not be refreshed.`);
@@ -1039,6 +1064,43 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
       setStageDecisionFeedbackError(true);
     } finally {
       setStageDecisionPending(null);
+    }
+  };
+  const submitRiskChannel = async (riskChannel: string) => {
+    if (!isRiskChannelValue(riskChannel) || !serviceId) return;
+
+    const previousChannel = selectedRiskChannel;
+    setSelectedRiskChannel(riskChannel);
+    setRiskChannelSaving(true);
+    setRiskChannelFeedback(null);
+    setRiskChannelFeedbackError(false);
+    try {
+      await updateRiskChannel({ shipmentId: serviceId, riskChannel });
+      setService((current) =>
+        current
+          ? {
+              ...current,
+              managerRiskChannel: riskChannel,
+              riskChannel,
+              riskLevel: riskChannel,
+            }
+          : current,
+      );
+      setRiskChannelFeedback(`${copy.riskChannelUpdated} ${riskChannel}.`);
+      const refreshResults = await Promise.allSettled([
+        fetchReviewCases(),
+        fetchDashboard(),
+        fetchAssessmentLogs(),
+      ]);
+      if (refreshResults.some((result) => result.status === "rejected")) {
+        setRiskChannelFeedback(`Risk channel updated to ${riskChannel}, but some dashboard data could not be refreshed.`);
+      }
+    } catch (error: unknown) {
+      setSelectedRiskChannel(previousChannel);
+      setRiskChannelFeedback(error instanceof Error ? error.message : "Unable to update the risk channel.");
+      setRiskChannelFeedbackError(true);
+    } finally {
+      setRiskChannelSaving(false);
     }
   };
   const recentActivity = useMemo(() => {
@@ -1527,13 +1589,13 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
 
                     <section className="space-y-3 rounded-lg border border-slate-200 p-4">
                       <div>
-                        <h3 className="text-sm font-bold text-slate-900">Stage decision</h3>
+                        <h3 className="text-sm font-bold text-slate-900">{copy.stageDecision}</h3>
                         <p className="mt-1 text-xs text-slate-500">
                           Decisions are saved to the service workflow. A reason is required to return or reject this stage.
                         </p>
                       </div>
                       <label className="block text-xs font-medium text-slate-700">
-                        Decision notes
+                        {copy.decisionNotes}
                         <textarea
                           maxLength={2000}
                           rows={3}
@@ -1571,7 +1633,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                           {stageDecisionPending === "Approve"
                             ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
                             : <CheckCircle2 className="h-3.5 w-3.5" />}
-                          Approve stage
+                          {copy.approveStage}
                         </button>
                         <button
                           type="button"
@@ -1582,7 +1644,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                           {stageDecisionPending === "ReturnToExecutor"
                             ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
                             : <RotateCcw className="h-3.5 w-3.5" />}
-                          Return to executor
+                          {copy.requestChanges}
                         </button>
                         <button
                           type="button"
@@ -1593,7 +1655,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                           {stageDecisionPending === "Reject"
                             ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
                             : <XCircle className="h-3.5 w-3.5" />}
-                          Reject
+                          {copy.blockReject}
                         </button>
                       </div>
                     </section>
@@ -1773,7 +1835,7 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 text-slate-500" />
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Risk &amp; compliance</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{copy.riskCompliance}</p>
             </div>
             {channel !== "—" && (
               <span className={`mt-3 inline-flex items-center gap-1 rounded border px-2.5 py-1 text-xs font-medium ${channelStyles(channel)}`}>
@@ -1786,6 +1848,30 @@ export default function AssessorServiceDetailPage({ params }: PageProps) {
                 ? display(service, "riskReason", "risk_reason", "riskNotes", "risk_notes", "complianceNotes", "compliance_notes")
                 : channelDirective(channel)}
             </p>
+            <label className="mt-3 block text-xs font-medium text-slate-700">
+              {copy.riskChannel}
+              <select
+                value={selectedRiskChannel}
+                onChange={(event) => void submitRiskChannel(event.currentTarget.value)}
+                disabled={!serviceId || riskChannelSaving}
+                className="mt-1 w-full rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:cursor-wait disabled:bg-slate-50"
+              >
+                <option value="">{copy.selectRiskChannel}</option>
+                <option value="Green">Green</option>
+                <option value="Yellow">Yellow</option>
+                <option value="Blue">Blue</option>
+                <option value="Red">Red</option>
+              </select>
+            </label>
+            {riskChannelSaving && <p role="status" className="mt-2 text-xs text-slate-500">{copy.updatingRiskChannel}</p>}
+            {riskChannelFeedback && (
+              <p
+                role={riskChannelFeedbackError ? "alert" : "status"}
+                className={`mt-2 text-xs ${riskChannelFeedbackError ? "text-rose-700" : "text-emerald-700"}`}
+              >
+                {riskChannelFeedback}
+              </p>
+            )}
           </section>
 
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">

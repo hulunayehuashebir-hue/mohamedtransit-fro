@@ -62,8 +62,15 @@ export const shipmentEndpoints = {
     return service.put(API_ROUTES.shipment.updateStageTransport, formData);
   },
 
-  uploadDocument: (payload: ShipmentDocumentPayload) =>
-    service.post(API_ROUTES.shipment.uploadDocument, payload),
+  uploadDocument: (
+    payload: ShipmentDocumentPayload,
+    onProgress?: (progress: number) => void,
+  ) =>
+    service.post(API_ROUTES.shipment.uploadDocument, payload, {
+      onUploadProgress: (event) => {
+        if (event.total) onProgress?.(Math.round((event.loaded / event.total) * 100));
+      },
+    }),
 
   getStages: (params?: ShipmentParams) =>
     service.get(API_ROUTES.shipment.getStages, { params }),

@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import { redirect, usePathname, useSearchParams } from "next/navigation";
 import { useAuthStore } from "@/modules/auth/auth.store";
 import AssessorDashboardPage from "./components/assessor";
@@ -37,7 +38,7 @@ const normalizeRole = (value: unknown): string => {
   return "";
 };
 
-const DashboardPage = () => {
+const DashboardContent = () => {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const authUser = useAuthStore((state) => state.user);
@@ -75,4 +76,10 @@ const DashboardPage = () => {
   return <div className="min-h-screen">{renderDashboard()}</div>;
 };
 
-export default DashboardPage;
+export default function DashboardPage() {
+  return (
+    <Suspense fallback={<div role="status" className="p-6 text-sm text-slate-500">Loading dashboard...</div>}>
+      <DashboardContent />
+    </Suspense>
+  );
+}

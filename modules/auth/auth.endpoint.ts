@@ -34,6 +34,55 @@ export type AuthResponse = Record<string, unknown> & {
   data?: Record<string, unknown>;
 };
 
+export type SignupFailureCode =
+  | "ACCOUNT_ALREADY_EXISTS"
+  | "SIGNUP_SERVICE_UNAVAILABLE";
+
+export class SignupRequestError extends Error {
+  constructor(
+    readonly code: SignupFailureCode,
+    readonly status: number,
+  ) {
+    super(
+      code === "ACCOUNT_ALREADY_EXISTS"
+        ? "An account with this email or username already exists."
+        : "Signup is temporarily unavailable.",
+    );
+    this.name = "SignupRequestError";
+  }
+}
+
+const getResponseErrorMessage = (body: unknown): string | undefined => {
+  if (typeof body === "string" && body.trim()) return body.trim();
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+
+  const record = body as Record<string, unknown>;
+  const errors = record.errors;
+  if (Array.isArray(errors)) {
+    for (const item of errors) {
+      if (typeof item === "string" && item.trim()) return item.trim();
+      if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+        const message = (item as Record<string, unknown>).message;
+        if (typeof message === "string" && message.trim()) return message.trim();
+      }
+    }
+  } else if (typeof errors === "object" && errors !== null) {
+    for (const fieldErrors of Object.values(errors)) {
+      if (Array.isArray(fieldErrors)) {
+        const message = fieldErrors.find(
+          (item): item is string => typeof item === "string" && Boolean(item.trim()),
+        );
+        if (message) return message.trim();
+      }
+    }
+  }
+
+  const message = [record.message, record.detail, record.error, record.title].find(
+    (value): value is string => typeof value === "string" && Boolean(value.trim()),
+  );
+  return message?.trim();
+};
+
 export const signup = async (user: FormData | IUser | unknown): Promise<AuthResponse> => {
   const isFormData = user instanceof FormData;
   const response = await fetch("/api/auth/signup", {
@@ -59,14 +108,18 @@ export const signup = async (user: FormData | IUser | unknown): Promise<AuthResp
   }
 
   if (!response.ok) {
-    if (typeof body === "string" && body.trim()) throw new Error(body);
-    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-      const record = body as Record<string, unknown>;
-      const message = [record.message, record.detail, record.error, record.title].find(
-        (value): value is string => typeof value === "string" && Boolean(value.trim()),
-      );
-      if (message) throw new Error(message);
+    const bodyCode =
+      typeof body === "object" && body !== null && !Array.isArray(body)
+        ? (body as Record<string, unknown>).code
+        : undefined;
+    if (response.status === 409 || bodyCode === "ACCOUNT_ALREADY_EXISTS") {
+      throw new SignupRequestError("ACCOUNT_ALREADY_EXISTS", response.status);
     }
+    if (response.status >= 500 || bodyCode === "SIGNUP_SERVICE_UNAVAILABLE") {
+      throw new SignupRequestError("SIGNUP_SERVICE_UNAVAILABLE", response.status);
+    }
+    const message = getResponseErrorMessage(body);
+    if (message) throw new Error(message);
     throw new Error(`Sign up failed (${response.status}).`);
   }
 
@@ -97,14 +150,8 @@ export const login = (payload: ILogin): Promise<LoginResponse> => {
     }
 
     if (!response.ok) {
-      if (typeof body === "string" && body.trim()) throw new Error(body);
-      if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-        const record = body as Record<string, unknown>;
-        const message = [record.message, record.detail, record.error, record.title].find(
-          (value): value is string => typeof value === "string" && Boolean(value.trim()),
-        );
-        if (message) throw new Error(message);
-      }
+      const message = getResponseErrorMessage(body);
+      if (message) throw new Error(message);
       throw new Error(`Login failed (${response.status}).`);
     }
 

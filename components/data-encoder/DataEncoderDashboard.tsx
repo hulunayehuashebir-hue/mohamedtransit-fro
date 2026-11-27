@@ -32,6 +32,8 @@ import {
 	getEncoderServiceDraft,
 	saveEncoderServiceDraft,
 	deleteEncoderServiceDraft,
+	ENCODER_DRAFTS_UPDATED_EVENT,
+	getEncoderServiceDrafts,
 	type EncoderServiceDraft,
 } from "@/modules/dataencoder/data-encoder.drafts";
 import useAuthStore from "@/modules/auth/auth.store";
@@ -50,6 +52,8 @@ import {
 	readJsonResponse,
 } from "@/modules/dataencoder/data-encoder.response";
 import EncoderRoleSwitcher from "@/components/data-encoder/EncoderRoleSwitcher";
+import { getDataEncoderNavigationCopy } from "@/features/services/service.copy";
+import { useMessagingStore } from "@/modules/message/message.store";
 
 interface EncoderCustomer extends Record<string, unknown> {
   id: string;
@@ -246,6 +250,7 @@ export default function DataEncoderDashboard() {
   const router = useRouter();
   const firstSegment = pathname.split("/").filter(Boolean)[0];
   const locale = firstSegment === "am" || firstSegment === "en" ? firstSegment : "en";
+  const navigationCopy = getDataEncoderNavigationCopy(locale);
   const encoderBase = `/${locale}/admin/data-encoder`;
   const createServiceHref = `${encoderBase}/services/new`;
   const isStandaloneDashboard = pathname.includes("/admin/data-encoder/dashboard");
@@ -256,6 +261,9 @@ export default function DataEncoderDashboard() {
   const notificationsLoading = useNotificationStore((state) => state.loading);
   const notificationsError = useNotificationStore((state) => state.error);
   const fetchNotifications = useNotificationStore((state) => state.fetchNotifications);
+  const unreadMessageCount = useMessagingStore((state) => state.unreadCount);
+  const fetchUnreadMessageCount = useMessagingStore((state) => state.fetchUnreadCount);
+  const [draftCount, setDraftCount] = useState(0);
   const markNotificationRead = useNotificationStore((state) => state.markAsRead);
   const { dashboardData, unavailableMetrics, loading, error, fetchDashboard } = useDataEncoderStore();
   const [customers, setCustomers] = useState<EncoderCustomer[]>([]);
@@ -315,6 +323,29 @@ export default function DataEncoderDashboard() {
   useEffect(() => {
     void fetchDashboard();
   }, [fetchDashboard]);
+
+  useEffect(() => {
+    const refreshDraftCount = () => {
+      try {
+        setDraftCount(getEncoderServiceDrafts().length);
+      } catch (draftError: unknown) {
+        console.error("Unable to read saved Data Encoder drafts for navigation.", draftError);
+      }
+    };
+    refreshDraftCount();
+    window.addEventListener("storage", refreshDraftCount);
+    window.addEventListener(ENCODER_DRAFTS_UPDATED_EVENT, refreshDraftCount);
+    return () => {
+      window.removeEventListener("storage", refreshDraftCount);
+      window.removeEventListener(ENCODER_DRAFTS_UPDATED_EVENT, refreshDraftCount);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (user?.id !== undefined && user?.id !== null && user?.id !== "") {
+      void fetchUnreadMessageCount();
+    }
+  }, [fetchUnreadMessageCount, user?.id]);
 
   useEffect(() => {
     if (isStandaloneDashboard) return;
@@ -678,7 +709,7 @@ export default function DataEncoderDashboard() {
           <div className="mb-6">
             {!sidebarCollapsed && (
               <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Overview
+                {navigationCopy.overview}
               </p>
             )}
             <Link
@@ -701,21 +732,41 @@ export default function DataEncoderDashboard() {
                 }`}
                 strokeWidth={1.9}
               />
-              {!sidebarCollapsed && <span className="truncate">Dashboard</span>}
+              {!sidebarCollapsed && <span className="min-w-0 flex-1 truncate">{navigationCopy.dashboard}</span>}
+            </Link>
+            <Link
+              href={`${encoderBase}/draft-services`}
+              title={sidebarCollapsed ? navigationCopy.draftServices : undefined}
+              onClick={() => {
+                setActiveSection("draft-services");
+                setMobileSidebarOpen(false);
+              }}
+              aria-current={activeSection === "draft-services" ? "page" : undefined}
+              className={`group mt-1 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
+                activeSection === "draft-services"
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+              }`}
+            >
+              <FileText className={`h-[19px] w-[19px] shrink-0 ${activeSection === "draft-services" ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
+              {!sidebarCollapsed && <span className="min-w-0 flex-1 truncate">{navigationCopy.draftServices}</span>}
+              <span className={`inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[11px] font-semibold ${activeSection === "draft-services" ? "bg-white/20 text-white" : "bg-blue-100 text-blue-700"}`}>
+                {draftCount > 99 ? "99+" : draftCount}
+              </span>
             </Link>
           </div>
           <div>
             {!sidebarCollapsed && (
               <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Capture operations
+                {navigationCopy.dataEntry}
               </p>
             )}
             <div className="space-y-1">
               {[
-                { label: "Customers", href: `${encoderBase}/customers`, id: "customers", Icon: UsersRound },
-                { label: "Create service", href: createServiceHref, id: "create-service", Icon: BriefcaseBusiness },
-                { label: "Services", href: `${encoderBase}/services`, id: "services", Icon: BriefcaseBusiness },
-                { label: "Draft services", href: `${encoderBase}/draft-services`, id: "draft-services", Icon: FileText },
+                { label: navigationCopy.createCustomer, href: `${encoderBase}/customers/new`, id: "create-customer", Icon: UsersRound },
+                { label: navigationCopy.customerList, href: `${encoderBase}/customers`, id: "customers", Icon: UsersRound },
+                { label: navigationCopy.createService, href: createServiceHref, id: "create-service", Icon: BriefcaseBusiness },
+                { label: navigationCopy.services, href: `${encoderBase}/services`, id: "services", Icon: BriefcaseBusiness },
               ].map(({ label, href, id, Icon }) => {
                 const active = activeSection === id;
                 return (
@@ -749,14 +800,14 @@ export default function DataEncoderDashboard() {
           <div className="mt-6">
             {!sidebarCollapsed && (
               <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Documents
+                {navigationCopy.documents}
               </p>
             )}
             <div className="space-y-1">
               {[
-                { label: "Documents", href: `${encoderBase}/documents`, id: "documents", Icon: FolderOpen },
-                { label: "Bulk Upload", href: `${encoderBase}/bulk-upload`, id: "bulk-upload", Icon: UploadCloud },
-                { label: "Service document library", href: `${encoderBase}/templates`, id: "templates", Icon: FileDown },
+                { label: navigationCopy.documents, href: `${encoderBase}/documents`, id: "documents", Icon: FolderOpen },
+                { label: navigationCopy.bulkUpload, href: `${encoderBase}/bulk-upload`, id: "bulk-upload", Icon: UploadCloud },
+                { label: navigationCopy.documentTemplates, href: `${encoderBase}/templates`, id: "templates", Icon: FileDown },
               ].map(({ label, href, id, Icon }) => {
                 const active = activeSection === id;
                 return (
@@ -785,13 +836,14 @@ export default function DataEncoderDashboard() {
           <div className="mt-6">
             {!sidebarCollapsed && (
               <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Communication
+                {navigationCopy.communication}
               </p>
             )}
             <div className="space-y-1">
               {[
-                { label: "Messages", href: `${encoderBase}/messages`, id: "messages", Icon: MessageSquare },
-                { label: "Notifications", href: `${encoderBase}/notifications`, id: "notifications", Icon: Bell },
+                { label: navigationCopy.messages, href: `${encoderBase}/messages`, id: "messages", Icon: MessageSquare },
+                { label: navigationCopy.notifications, href: `${encoderBase}/notifications`, id: "notifications", Icon: Bell },
+                { label: navigationCopy.profile, href: `${encoderBase}/profile`, id: "profile", Icon: UserCircle },
               ].map(({ label, href, id, Icon }) => (
                 <Link
                   key={id}
@@ -814,34 +866,15 @@ export default function DataEncoderDashboard() {
                     }`}
                     strokeWidth={1.9}
                   />
-                  {!sidebarCollapsed && <span className="truncate">{label}</span>}
+                  {!sidebarCollapsed && <span className="min-w-0 flex-1 truncate">{label}</span>}
+                  {id === "messages" && (
+                    <span className={`inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[11px] font-semibold ${activeSection === id ? "bg-white/20 text-white" : "bg-rose-100 text-rose-700"}`}>
+                      {unreadMessageCount > 99 ? "99+" : unreadMessageCount}
+                    </span>
+                  )}
                 </Link>
               ))}
             </div>
-          </div>
-          <div className="mt-6">
-            {!sidebarCollapsed && (
-              <p className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Account
-              </p>
-            )}
-            <Link
-              href={`${encoderBase}/profile`}
-              title={sidebarCollapsed ? "Profile" : undefined}
-              onClick={() => {
-                setActiveSection("profile");
-                setMobileSidebarOpen(false);
-              }}
-              aria-current={activeSection === "profile" ? "page" : undefined}
-              className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
-                activeSection === "profile"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-              }`}
-            >
-              <UserCircle className={`h-[19px] w-[19px] shrink-0 ${activeSection === "profile" ? "text-white" : "text-slate-500 group-hover:text-slate-700"}`} strokeWidth={1.9} />
-              {!sidebarCollapsed && <span className="truncate">Profile</span>}
-            </Link>
           </div>
         </nav>
         <div className="border-t border-slate-200 p-3">

@@ -14,11 +14,35 @@ export const CaseExecutorEndpoints = {
     service.get<unknown>(API_ROUTES.caseExecutor.getDashboard),
   getAssignedServices: () =>
       service.get<unknown>(API_ROUTES.caseExecutor.getAssignedServices),
+  getWorkspace: (serviceIdOrCode: string | number) =>
+    service.get<unknown>(API_ROUTES.caseExecutor.getWorkspace(serviceIdOrCode)),
   getServiceDocuments: (serviceId: string | number) =>
       service.get<unknown>(API_ROUTES.document.getServiceDocuments, {
         params: { serviceId },
         validateStatus: (status) => (status >= 200 && status < 300) || status === 400,
       }),
+  getStageDiscussions: (serviceId: string | number, stageId: string | number) =>
+    service.get<unknown>(API_ROUTES.caseExecutor.getWorkspaceDiscussions(serviceId, stageId)),
+  addWorkspaceStageDiscussion: (
+    serviceId: string | number,
+    stageId: string | number,
+    message: string,
+  ) =>
+    service.post<unknown>(
+      API_ROUTES.caseExecutor.getWorkspaceDiscussions(serviceId, stageId),
+      { message },
+    ),
+  escalateService: (payload: { serviceId: number; reason: string }) =>
+    service.post(API_ROUTES.assessor.escalateService, {
+      serviceId: payload.serviceId,
+      reason: payload.reason,
+      notes: null,
+    }),
+  notifyImporter: (payload: { serviceId: number; subject: string; message: string }) =>
+    service.post(API_ROUTES.assessor.notifyImporter, {
+      ...payload,
+      isUrgent: false,
+    }),
   uploadAssignedServiceDocument: (payload: FormData) =>
     service.post<unknown>(API_ROUTES.document.uploadServiceDocument, payload),
   deleteAssignedDocument: (documentId: string | number, source: "service" | "stage") =>
@@ -79,6 +103,15 @@ export const CaseExecutorEndpoints = {
     service.get<unknown>(API_ROUTES.caseExecutor.getMyActivity),
   uploadStageDocument: (payload: FormData) =>
     service.post<unknown>(API_ROUTES.caseExecutor.uploadStageDocument, payload),
+  uploadWorkspaceStageDocument: (
+    serviceId: string | number,
+    stageId: string | number,
+    payload: FormData,
+  ) =>
+    service.post<unknown>(
+      API_ROUTES.caseExecutor.uploadWorkspaceStageDocument(serviceId, stageId),
+      payload,
+    ),
   addStageComment: (payload: CaseExecutorStageCommentRequest) =>
     service.post<unknown>(API_ROUTES.caseExecutor.addStageComment, payload),
   setRiskLevel: (payload: CaseExecutorRiskLevelRequest) =>

@@ -23,6 +23,7 @@ import useAuthStore from "@/modules/auth/auth.store";
 import { useCaseExecutorStore } from "@/modules/case-Executer/case-Executer.store";
 import { useMessagingStore } from "@/modules/message/message.store";
 import { useNotificationStore } from "@/features/notifications/notification.store";
+import { getAssessorCopy } from "@/modules/assessor/assessor.copy";
 
 const subscribeToHydration = () => () => {};
 const getClientHydrationSnapshot = () => true;
@@ -89,7 +90,7 @@ const accountItems = [
 const caseExecutorItems = [
   {
     label: "Assigned Services",
-    href: "/admin/case-Executer/services",
+    href: "/admin/case-Executer/assigned-service",
     icon: BriefcaseBusiness,
     group: "today",
   },
@@ -141,6 +142,7 @@ export default function AssessorSidebar() {
   const pathname = usePathname();
   const params = useParams();
   const lang = (params.lang as string) || "en";
+  const navigationCopy = getAssessorCopy(lang).navigation;
   const router = useRouter();
   const authReady = useSyncExternalStore(
     subscribeToHydration,
@@ -211,6 +213,7 @@ export default function AssessorSidebar() {
   useEffect(() => {
     if (activeRole === "case_executor") {
       const timeoutId = window.setTimeout(() => {
+        void useCaseExecutorStore.getState().fetchAssignedServices();
         void useMessagingStore.getState().fetchUnreadCount();
         void useNotificationStore.getState().fetchUnreadCount();
       }, 0);
@@ -245,6 +248,17 @@ export default function AssessorSidebar() {
     badge?: number;
   }) => {
     const Icon = item.icon;
+    const localizedLabels: Record<string, string> = {
+      "Customer Approvals": navigationCopy.customerApprovals,
+      "Service Reviews": navigationCopy.serviceReviews,
+      Services: navigationCopy.services,
+      Documents: navigationCopy.documents,
+      "Assessment Logs": navigationCopy.assessmentLogs,
+      Messages: navigationCopy.messages,
+    };
+    const label = activeRole === "assessor"
+      ? localizedLabels[item.label] ?? item.label
+      : item.label;
     const active = isActive(item.href);
     const fullHref = `/${lang}${item.href}`;
 
@@ -253,7 +267,7 @@ export default function AssessorSidebar() {
         key={item.href}
         href={fullHref}
         onClick={closeMobileSidebar}
-        title={sidebarCollapsed ? item.label : undefined}
+        title={sidebarCollapsed ? label : undefined}
         aria-current={active ? "page" : undefined}
         className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 ${
           active
@@ -272,7 +286,7 @@ export default function AssessorSidebar() {
 
         {!sidebarCollapsed && (
           <>
-            <span className="min-w-0 flex-1 truncate">{item.label}</span>
+            <span className="min-w-0 flex-1 truncate">{label}</span>
             {item.badge !== undefined && item.badge > 0 && (
               <span className={`min-w-5 rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold ${
                 active ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"

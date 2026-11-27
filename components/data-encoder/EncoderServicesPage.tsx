@@ -18,6 +18,7 @@ import {
 import EncoderSectionLayout from "@/components/data-encoder/EncoderSectionLayout";
 import { DataEncoderEndpoints } from "@/modules/dataencoder/data-encoder.endpoint";
 import { normalizeEncoderServiceMode } from "@/modules/dataencoder/service-mode";
+import { getManagerServicesCopy, getCaseExecutorServicesCopy } from "@/features/services/service.copy";
 
 type ServiceRecord = Record<string, unknown>;
 
@@ -331,6 +332,8 @@ const readRequestError = (error: unknown): string =>
 export default function EncoderServicesPage() {
 	const pathname = usePathname();
 	const locale = pathname.split("/")[1];
+	const copy = getManagerServicesCopy(locale === "am" ? "am" : "en");
+	const encoderCopy = getCaseExecutorServicesCopy(locale === "am" ? "am" : "en");
 	const serviceRoute = /^\/(?:en|am)\/admin\/data-encoder(?:\/|$)/.test(pathname)
 		? `/${locale}/admin/data-encoder/services`
 		: "/encoder/services";
@@ -420,6 +423,18 @@ export default function EncoderServicesPage() {
 	);
 
 	const visibleColumnCount = serviceColumns.filter(({ id }) => visibleColumns[id]).length;
+	const statusLabels = encoderCopy.statusLabels as Record<string, string>;
+	const riskLabels = encoderCopy.riskLabels as Record<string, string>;
+	const columnLabel = (column: ServiceColumn): string => ({
+		importer: copy.importer,
+		mode: copy.mode,
+		status: copy.status,
+		risk: copy.risk,
+		caseOwner: copy.caseExecutor,
+		eta: copy.eta,
+		sla: copy.sla,
+		updated: copy.updated,
+	})[column];
 
 	const toggleColumn = (column: ServiceColumn) => {
 		setVisibleColumns((current) => ({ ...current, [column]: !current[column] }));
@@ -449,7 +464,7 @@ export default function EncoderServicesPage() {
 	return (
 		<EncoderSectionLayout
 			activeSection="services"
-			title="Services"
+			title={copy.title}
 			description="Cases you have created or captured data for."
 		>
 			<div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -461,7 +476,7 @@ export default function EncoderServicesPage() {
 								type="search"
 								value={query}
 								onChange={(event) => setQuery(event.target.value)}
-								placeholder="Search by service ID, reference, company..."
+								placeholder={copy.searchPlaceholder}
 								className="min-w-0 w-full bg-transparent text-xs outline-none placeholder:text-slate-500"
 							/>
 						</label>
@@ -475,8 +490,8 @@ export default function EncoderServicesPage() {
 									onChange={(event) => setStatusFilter(event.target.value)}
 									className="h-9 w-full appearance-none rounded-md border border-slate-200 bg-white py-2 pl-8 pr-8 text-xs text-slate-700 shadow-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
 								>
-									<option value="">All statuses</option>
-									{statuses.map((status) => <option key={status} value={status}>{status}</option>)}
+									<option value="">{copy.allStatuses}</option>
+									{statuses.map((status) => <option key={status} value={status}>{statusLabels[status] ?? status}</option>)}
 								</select>
 								<ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
 							</div>
@@ -488,8 +503,8 @@ export default function EncoderServicesPage() {
 									onChange={(event) => setModeFilter(event.target.value)}
 									className="h-9 w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-8 text-xs text-slate-700 shadow-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
 								>
-									<option value="">All modes</option>
-									{modes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+									<option value="">{copy.allModes}</option>
+									{modes.map((mode) => <option key={mode} value={mode}>{mode === "Unimodal" ? copy.unimodal : mode === "Multimodal" ? copy.multimodal : mode}</option>)}
 								</select>
 								<ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
 							</div>
@@ -501,15 +516,15 @@ export default function EncoderServicesPage() {
 									onChange={(event) => setRiskFilter(event.target.value)}
 									className="h-9 w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-8 text-xs text-slate-700 shadow-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
 								>
-									<option value="">All channels</option>
-									{risks.map((risk) => <option key={risk} value={risk}>{risk}</option>)}
+									<option value="">{copy.allChannels}</option>
+									{risks.map((risk) => <option key={risk} value={risk}>{riskLabels[risk] ?? risk}</option>)}
 								</select>
 								<ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
 							</div>
 							<details className="relative">
 								<summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
 									<Columns3 className="h-4 w-4" />
-									Columns
+									{copy.columns}
 								</summary>
 								<div className="absolute right-0 z-20 mt-2 w-48 rounded-lg border border-slate-200 bg-white p-2 shadow-lg">
 									<p className="px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Visible columns</p>
@@ -521,7 +536,7 @@ export default function EncoderServicesPage() {
 												onChange={() => toggleColumn(id)}
 												className="h-3.5 w-3.5 accent-blue-600"
 											/>
-											{label}
+											{columnLabel(id) || label}
 										</label>
 									))}
 								</div>
@@ -532,7 +547,7 @@ export default function EncoderServicesPage() {
 								className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
 							>
 								<Download className="h-4 w-4" />
-								Export
+								{copy.export}
 							</button>
 							<button
 								type="button"
@@ -573,18 +588,18 @@ export default function EncoderServicesPage() {
 						</colgroup>
 						<thead>
 							<tr className="bg-slate-50 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-								<th className="sticky left-0 z-10 bg-slate-50 px-5 py-3">Service</th>
-								{visibleColumns.importer && <th className="px-5 py-3">Importer</th>}
-								{visibleColumns.mode && <th className="px-5 py-3">Mode</th>}
-								{visibleColumns.status && <th className="px-5 py-3">Status</th>}
-								{visibleColumns.risk && <th className="px-5 py-3">Risk</th>}
-								{visibleColumns.caseOwner && <th className="px-5 py-3">Case executor</th>}
-								{visibleColumns.eta && <th className="px-5 py-3">ETA</th>}
-								{visibleColumns.sla && <th className="px-5 py-3">SLA</th>}
+								<th className="sticky left-0 z-10 bg-slate-50 px-5 py-3">{copy.service}</th>
+								{visibleColumns.importer && <th className="px-5 py-3">{copy.importer}</th>}
+								{visibleColumns.mode && <th className="px-5 py-3">{copy.mode}</th>}
+								{visibleColumns.status && <th className="px-5 py-3">{copy.status}</th>}
+								{visibleColumns.risk && <th className="px-5 py-3">{copy.risk}</th>}
+								{visibleColumns.caseOwner && <th className="px-5 py-3">{copy.caseExecutor}</th>}
+								{visibleColumns.eta && <th className="px-5 py-3">{copy.eta}</th>}
+								{visibleColumns.sla && <th className="px-5 py-3">{copy.sla}</th>}
 								{visibleColumns.updated && (
 									<th aria-sort={sortDirection === 1 ? "ascending" : "descending"} className="px-5 py-3">
 										<button type="button" onClick={() => setSortDirection((direction) => direction === 1 ? -1 : 1)} className="inline-flex items-center gap-1.5 hover:text-slate-800">
-											Updated <ArrowDownUp className={`h-3.5 w-3.5 ${sortDirection === 1 ? "rotate-180" : ""}`} />
+											{copy.updated} <ArrowDownUp className={`h-3.5 w-3.5 ${sortDirection === 1 ? "rotate-180" : ""}`} />
 										</button>
 									</th>
 								)}
@@ -594,11 +609,7 @@ export default function EncoderServicesPage() {
 							{sortedServices.map((service) => (
 								<tr key={`${service.id}-${service.customerReference}`} className="group border-t border-slate-200 bg-white hover:bg-slate-50/80">
 									<td className="sticky left-0 z-[1] overflow-hidden bg-white px-4 py-4 align-middle group-hover:bg-slate-50/80 sm:px-5">
-										{Number.isSafeInteger(Number(service.databaseId)) && Number(service.databaseId) > 0 ? (
-											<Link href={`${serviceRoute}/${encodeURIComponent(service.databaseId)}`} className="block w-full truncate font-mono text-[12px] font-semibold text-blue-800 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" title={`Open ${service.id}`}>{service.id}</Link>
-										) : (
-											<p className="block w-full truncate font-mono text-[12px] font-semibold text-blue-800" title={service.id}>{service.id}</p>
-										)}
+										<Link href={`${serviceRoute}/${encodeURIComponent(service.databaseId || service.id)}`} className="block w-full truncate font-mono text-[12px] font-semibold text-blue-800 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" title={`Open ${service.id}`}>{service.id}</Link>
 										{service.description && <p className="mt-1 block max-w-full truncate text-xs text-slate-500" title={service.description}>{service.description}</p>}
 									</td>
 									{visibleColumns.importer && <td className="px-5 py-4 align-middle">
@@ -621,14 +632,14 @@ export default function EncoderServicesPage() {
 													: service.status.toLowerCase().includes("complete") || service.status.toLowerCase().includes("approv")
 														? <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
 														: <AlertCircle className="h-3.5 w-3.5 shrink-0" />}
-												<span className="truncate">{service.status}</span>
+												<span className="truncate">{statusLabels[service.status] ?? service.status}</span>
 											</span>}
 									</td>}
 									{visibleColumns.risk && <td className="px-5 py-4">
 										{service.risk === "Unassigned"
 											? <span className="text-sm text-slate-400">—</span>
 											: <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold ring-1 ring-inset ${getRiskTone(service.risk)}`}>
-												<ShieldCheck className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{service.risk}</span>
+												<ShieldCheck className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{riskLabels[service.risk] ?? service.risk}</span>
 											</span>}
 									</td>}
 									{visibleColumns.caseOwner && <td className="px-5 py-4 text-sm text-slate-700">{service.caseOwner === "Unassigned" ? <span className="text-slate-400">—</span> : service.caseOwner}</td>}
@@ -642,7 +653,7 @@ export default function EncoderServicesPage() {
 							)}
 							{!loading && !error && filteredServices.length === 0 && (
 								<tr><td colSpan={visibleColumnCount + 1} className="px-5 py-12 text-center text-sm text-slate-500">
-									{records.length ? "No services match the selected filters." : "No service records found."}
+									{records.length ? encoderCopy.noMatches : encoderCopy.noServices}
 								</td></tr>
 							)}
 						</tbody>
@@ -650,7 +661,7 @@ export default function EncoderServicesPage() {
 				</div>
 
 				<div className="border-t border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-500">
-					Showing {filteredServices.length} of {services.length} services
+					{encoderCopy.showing} {filteredServices.length} {encoderCopy.of} {services.length} {encoderCopy.services}
 				</div>
 			</div>
 		</EncoderSectionLayout>

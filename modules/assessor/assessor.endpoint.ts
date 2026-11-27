@@ -12,6 +12,7 @@ import type {
   RecordAssessmentRequest,
   ServiceStageDecisionRequest,
   VerifyCustomerDocumentRequest,
+  UpdateAssessorRiskChannelRequest,
 } from "./assessor.type";
 import type { ShipmentDocumentPayload } from "@/modules/shipment/shipment.types";
 
@@ -77,6 +78,8 @@ export const AssessorEndpoints = {
     (await service.put(API_ROUTES.assessor.approveCustomer, data)) as unknown as CustomerApprovalResult,
   verifyCustomerDocument: (data: VerifyCustomerDocumentRequest) =>
     service.put(API_ROUTES.assessor.verifyCustomerDocument, data),
+  updateRiskChannel: (data: UpdateAssessorRiskChannelRequest) =>
+    service.put(API_ROUTES.assessor.updateRiskChannel, data),
   downloadCustomerDocument: (documentId: number) =>
     service.get(API_ROUTES.assessor.downloadCustomerDocument, {
       params: { documentId },

@@ -2,6 +2,8 @@ export type VerificationStatus = "Verified" | "Flagged" | "Rejected" | "Pending 
 
 export interface DocumentRecord {
   id: string;
+  backendId?: string;
+  source?: string;
   name: string;
   type: string;
   serviceId: string;

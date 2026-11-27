@@ -70,6 +70,26 @@ export interface ManagerExecutorAssignmentRequest {
   caseExecutorId: number;
 }
 
+export interface ManagerAssessorAssignmentRequest {
+  serviceId: number;
+  userId: number;
+}
+
+export interface ManagerStageWorkspaceUpdateRequest {
+  serviceId: number;
+  stageId: number;
+  action: "draft" | "advance" | "block";
+  stageStatus: string;
+  riskChannel: string;
+  stageNote: string;
+}
+
+export interface ManagerImporterMessageRequest {
+  serviceId: number;
+  subject?: string;
+  message: string;
+}
+
 export interface ManagerAddStageDiscussionRequest {
   serviceId: number;
   stageId: number;
@@ -95,6 +115,11 @@ export interface ManagerExecutorAssignment extends ManagerRecentService {
   cargo_description?: string | null;
   route_summary?: string | null;
   estimated_arrival?: string | null;
+  carrier?: string | null;
+  vessel?: string | null;
+  flight?: string | null;
+  voyage?: string | null;
+  containerNumber?: string | null;
   risk_channel?: "blue" | "green" | "yellow" | "red" | null;
   risk_channel_label?: string | null;
   risk_channel_description?: string | null;
@@ -143,12 +168,14 @@ export interface ManagerStageDiscussion {
   comment: string;
   createdAt: string | null;
   author: string | null;
+  role?: string | null;
 }
 
 export interface ManagerServiceActivity {
   id: string;
   label: string;
   date: string | null;
+  actorName?: string | null;
 }
 
 export interface ManagerConsignmentDetails {
@@ -159,12 +186,19 @@ export interface ManagerConsignmentDetails {
   taxCategory: string | null;
   countryOfOrigin: string | null;
   registeredDate: string | null;
+  carrier?: string | null;
+  vessel?: string | null;
+  flight?: string | null;
+  voyage?: string | null;
+  containerNumber?: string | null;
 }
 
 export interface ManagerServiceStage {
   id?: number | string;
   order: number;
   serviceStageId?: number | string;
+  stageId?: number | string;
+  workflowStageId?: number | string;
   stageExecutionId?: number | string;
   serviceStageExecutionId?: number | string;
   executionId?: number | string;
@@ -177,9 +211,20 @@ export interface ManagerServiceStage {
   createdAt?: string | null;
   updatedAt?: string | null;
   updated_at: string | null;
+  startedAt?: string | null;
   completedAt?: string | null;
   notes: string | null;
   comments?: string | null;
+  requiredDocuments?: ManagerRequiredServiceDocument[];
+  discussionCount?: number;
+  previousStageSummary?: {
+    stageName: string;
+    status: string;
+    summaryNote: string | null;
+    completedAt: string | null;
+    durationHours: number | null;
+    completedByName: string | null;
+  } | null;
   documents: ManagerServiceDocument[];
   [key: string]: unknown;
 }
@@ -188,7 +233,15 @@ export type ManagerWorkflowStageStatus =
   | "completed"
   | "needs_review"
   | "in_progress"
-  | "not_started";
+  | "not_started"
+  | "blocked"
+  | "requires_customer_action";
+
+export interface ManagerRequiredServiceDocument {
+  documentType: string;
+  status: string;
+  documentId: number | string | null;
+}
 
 export const MANAGER_WORKFLOW_STAGE_NAMES = [
   "Prepayment Invoice",
@@ -241,6 +294,9 @@ export interface ManagerServiceDocument {
   verificationNotes?: string | null;
   fileSizeBytes?: number | null;
   createAt?: string | null;
+  uploadedBy?: string | null;
+  fileUrl?: string | null;
+  documentName?: string | null;
 }
 
 export interface ManagerServiceDetail extends ManagerExecutorAssignment {
@@ -248,6 +304,8 @@ export interface ManagerServiceDetail extends ManagerExecutorAssignment {
   stages: ManagerServiceStage[];
   documents: ManagerServiceDocument[];
   messages: ManagerServiceMessage[];
+  recentActivity: ManagerServiceActivity[];
+  logistics: ManagerConsignmentDetails | null;
 }
 
 export interface ManagerCustomerQuery {
@@ -260,6 +318,7 @@ export interface ManagerCustomerQuery {
 export interface ManagerServiceQuery {
   status?: string;
   type?: string;
+  searchTerm?: string;
   customerId?: number;
   caseExecutorId?: number;
   page?: number;

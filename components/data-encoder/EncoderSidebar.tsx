@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -15,6 +15,13 @@ import {
   Plus,
   X,
 } from 'lucide-react';
+import { getDataEncoderNavigationCopy } from '@/features/services/service.copy';
+import { useMessagingStore } from '@/modules/message/message.store';
+import useAuthStore from '@/modules/auth/auth.store';
+import {
+  ENCODER_DRAFTS_UPDATED_EVENT,
+  getEncoderServiceDrafts,
+} from '@/modules/dataencoder/data-encoder.drafts';
 
 interface SidebarItem {
   id: string;
@@ -28,6 +35,7 @@ interface SidebarItem {
 }
 
 interface SidebarSection {
+  id: string;
   title: string;
   items: SidebarItem[];
   defaultOpen?: boolean;
@@ -38,12 +46,6 @@ interface EncoderSidebarProps {
   onClose: () => void;
   onSectionClick?: (sectionId: string) => void;
   activeSection?: string;
-  stats?: {
-    draftServices?: number;
-    pendingApprovals?: number;
-    recentCustomers?: number;
-    recentServices?: number;
-  };
 }
 
 export default function EncoderSidebar({
@@ -51,62 +53,88 @@ export default function EncoderSidebar({
   onClose,
   onSectionClick,
   activeSection,
-  stats = {},
 }: EncoderSidebarProps) {
   const pathname = usePathname();
   const firstSegment = pathname.split('/').filter(Boolean)[0];
   const locale = firstSegment === 'am' || firstSegment === 'en' ? firstSegment : 'en';
   const encoderBase = `/${locale}/admin/data-encoder`;
+  const copy = getDataEncoderNavigationCopy(locale);
+  const [draftCount, setDraftCount] = useState(0);
+  const unreadCount = useMessagingStore((state) => state.unreadCount);
+  const fetchUnreadCount = useMessagingStore((state) => state.fetchUnreadCount);
+  const userId = useAuthStore((state) => state.user?.id);
+
+  useEffect(() => {
+    const refreshDraftCount = () => {
+      try {
+        setDraftCount(getEncoderServiceDrafts().length);
+      } catch (error: unknown) {
+        console.error('Unable to read saved Data Encoder drafts for navigation.', error);
+      }
+    };
+    refreshDraftCount();
+    window.addEventListener('storage', refreshDraftCount);
+    window.addEventListener(ENCODER_DRAFTS_UPDATED_EVENT, refreshDraftCount);
+    return () => {
+      window.removeEventListener('storage', refreshDraftCount);
+      window.removeEventListener(ENCODER_DRAFTS_UPDATED_EVENT, refreshDraftCount);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (userId !== undefined && userId !== null && userId !== '') {
+      void fetchUnreadCount();
+    }
+  }, [fetchUnreadCount, userId]);
+
   const sections: SidebarSection[] = useMemo(
     () => [
       {
-        title: 'Overview',
+        id: 'overview',
+        title: copy.overview,
         defaultOpen: true,
         items: [
-          { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="h-4 w-4" />, href: `${encoderBase}/dashboard` },
-          { id: 'drafts', label: 'Draft Services', icon: <FileText className="h-4 w-4" />, href: `${encoderBase}/draft-services`, badge: stats.draftServices, badgeColor: 'bg-sky-700' },
+          { id: 'dashboard', label: copy.dashboard, icon: <LayoutDashboard className="h-4 w-4" />, href: `${encoderBase}/dashboard` },
+          { id: 'draft-services', label: copy.draftServices, icon: <FileText className="h-4 w-4" />, href: `${encoderBase}/draft-services`, badge: draftCount, badgeColor: 'bg-sky-700' },
         ],
       },
       {
-        title: 'Data Entry',
+        id: 'data-entry',
+        title: copy.dataEntry,
         defaultOpen: true,
         items: [
-          { id: 'create-customer', label: 'Create Customer', icon: <UsersRound className="h-4 w-4" />, href: `${encoderBase}/customers` },
-          { id: 'customer-list', label: 'Customer List', icon: <UsersRound className="h-4 w-4" />, href: `${encoderBase}/customers` },
-          { id: 'create-service', label: 'Create Service', icon: <Plus className="h-4 w-4" />, href: `${encoderBase}/services/new` },
-          { id: 'services-list', label: 'Services', icon: <BriefcaseBusiness className="h-4 w-4" />, href: `${encoderBase}/services` },
+          { id: 'create-customer', label: copy.createCustomer, icon: <UsersRound className="h-4 w-4" />, href: `${encoderBase}/customers/new` },
+          { id: 'customer-list', label: copy.customerList, icon: <UsersRound className="h-4 w-4" />, href: `${encoderBase}/customers` },
+          { id: 'create-service', label: copy.createService, icon: <Plus className="h-4 w-4" />, href: `${encoderBase}/services/new` },
+          { id: 'services-list', label: copy.services, icon: <BriefcaseBusiness className="h-4 w-4" />, href: `${encoderBase}/services` },
         ],
       },
       {
-        title: 'Documents',
+        id: 'documents',
+        title: copy.documents,
         defaultOpen: true,
         items: [
-          { id: 'documents', label: 'Documents', icon: <FileText className="h-4 w-4" />, href: `${encoderBase}/documents`, description: 'Review and upload service documents' },
+          { id: 'documents', label: copy.documents, icon: <FileText className="h-4 w-4" />, href: `${encoderBase}/documents` },
+          { id: 'bulk-upload', label: copy.bulkUpload, icon: <FileText className="h-4 w-4" />, href: `${encoderBase}/bulk-upload` },
+          { id: 'document-templates', label: copy.documentTemplates, icon: <FileText className="h-4 w-4" />, href: `${encoderBase}/templates` },
         ],
       },
       {
-        title: 'Communication',
+        id: 'communication',
+        title: copy.communication,
         defaultOpen: true,
         items: [
-          { id: 'messages', label: 'Messages', icon: <MessageSquare className="h-4 w-4" />, href: `${encoderBase}/messages` },
-          { id: 'notifications', label: 'Notifications', icon: <Bell className="h-4 w-4" />, href: `${encoderBase}/notifications` },
-        ],
-      },
-      {
-        title: 'Account',
-        defaultOpen: true,
-        items: [
-          { id: 'profile', label: 'Profile', icon: <UserCircle className="h-4 w-4" />, href: `${encoderBase}/profile` },
+          { id: 'messages', label: copy.messages, icon: <MessageSquare className="h-4 w-4" />, href: `${encoderBase}/messages`, badge: unreadCount, badgeColor: 'bg-rose-600' },
+          { id: 'notifications', label: copy.notifications, icon: <Bell className="h-4 w-4" />, href: `${encoderBase}/notifications` },
+          { id: 'profile', label: copy.profile, icon: <UserCircle className="h-4 w-4" />, href: `${encoderBase}/profile` },
         ],
       },
     ],
-    [encoderBase, stats.draftServices],
+    [copy, draftCount, encoderBase, unreadCount],
   );
 
-  const sectionId = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-
   const [expandedSections, setExpandedSections] = useState<Set<string>>(() =>
-    new Set(sections.filter((section) => section.defaultOpen).map((section) => sectionId(section.title))),
+    new Set(sections.filter((section) => section.defaultOpen).map((section) => section.id)),
   );
 
   const toggleSection = (sectionIdValue: string) => {
@@ -171,7 +199,7 @@ export default function EncoderSidebar({
 
         <nav aria-label="Data Encoder navigation" className="flex-1 space-y-2 overflow-y-auto px-3 py-5">
           {sections.map((section) => {
-            const sectionKey = sectionId(section.title);
+            const sectionKey = section.id;
             const isExpanded = expandedSections.has(sectionKey);
             return (
               <div key={section.title}>
@@ -193,7 +221,7 @@ export default function EncoderSidebar({
                         <>
                           {item.icon}
                           <span className="min-w-0 flex-1">{item.label}</span>
-                          {item.badge !== undefined && typeof item.badge === 'number' && item.badge > 0 && (
+                          {item.badge !== undefined && typeof item.badge === 'number' && (
                             <span
                               className={`inline-flex min-w-fit items-center justify-center rounded-full px-2 py-0.5 text-xs font-semibold text-white ${
                                 item.badgeColor || 'bg-slate-600'

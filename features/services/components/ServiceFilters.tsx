@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
 import { useServiceStore } from "../service.store";
 import { Search, Filter, Columns, Download } from "lucide-react";
 import type { ServiceColumn, ServiceRecord } from "../service.types";
+import { getManagerServicesCopy } from "../service.copy";
 
 const columnOptions: Array<{ key: ServiceColumn; label: string }> = [
   { key: "service", label: "Service" },
@@ -32,32 +34,20 @@ const exportColumns: Array<{ label: string; value: (service: ServiceRecord) => s
   { label: "Updated", value: (service) => service.updated },
 ];
 
-const columnWidths = [24, 20, 36, 28, 18, 16, 20, 20, 24, 16, 18, 24];
-
-const cellColors: Record<string, { fill: string; text: string }> = {
-  "In progress": { fill: "FFE0F2FE", text: "FF075985" },
-  "Needs review": { fill: "FFFEF3C7", text: "FF92400E" },
-  "Requires customer action": { fill: "FFFCE7F3", text: "FF9D174D" },
-  Pending: { fill: "FFF1F5F9", text: "FF334155" },
-  Blocked: { fill: "FFFEE2E2", text: "FF991B1B" },
-  Completed: { fill: "FFDCFCE7", text: "FF166534" },
-  Delivered: { fill: "FFDCFCE7", text: "FF166534" },
-  Unimodal: { fill: "FFE0F2FE", text: "FF075985" },
-  Multimodal: { fill: "FFE0E7FF", text: "FF3730A3" },
-  "Green channel": { fill: "FFDCFCE7", text: "FF166534" },
-  "Yellow channel": { fill: "FFFEF3C7", text: "FF92400E" },
-  "Red channel": { fill: "FFFEE2E2", text: "FF991B1B" },
-  "Blue channel": { fill: "FFDBEAFE", text: "FF1E40AF" },
-};
-
 export function ServiceFilters({
   managerView = false,
-  embedded = false,
+  onSearchChange,
 }: {
   managerView?: boolean;
   embedded?: boolean;
+  onSearchChange?: () => void;
 }) {
+  const { lang } = useParams<{ lang: string }>();
+  const copy = getManagerServicesCopy(lang);
   const [columnsOpen, setColumnsOpen] = useState(false);
+  const selectableColumns = managerView
+    ? columnOptions.filter(({ key }) => key !== "service" && key !== "importer")
+    : columnOptions;
   const {
     searchQuery,
     setSearchQuery,
@@ -71,80 +61,32 @@ export function ServiceFilters({
     toggleColumn,
     getFilteredServices,
   } = useServiceStore();
+  const [searchInput, setSearchInput] = useState(searchQuery);
+
+  useEffect(() => {
+    if (searchInput.trim() === searchQuery) return;
+    const timer = window.setTimeout(() => {
+      setSearchQuery(searchInput.trim());
+      onSearchChange?.();
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [onSearchChange, searchInput, searchQuery, setSearchQuery]);
 
   const exportServices = async () => {
     const rows = getFilteredServices();
-    const { default: ExcelJS } = await import("exceljs");
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet("Services", {
-      properties: { tabColor: { argb: "FF2563EB" }, defaultRowHeight: 24 },
-      pageSetup: { orientation: "landscape", fitToPage: true, fitToWidth: 1 },
-      views: [{ state: "frozen", ySplit: 4 }],
-    });
-    const columnCount = exportColumns.length;
-
-    worksheet.columns = exportColumns.map((column, index) => ({
-      key: `column${index}`,
-      width: columnWidths[index] ?? 18,
-    }));
-    worksheet.mergeCells(1, 1, 1, columnCount);
-    worksheet.getCell("A1").value = managerView ? "MANAGER SERVICE REGISTER" : "SERVICE REGISTER";
-    worksheet.getCell("A1").font = { name: "Aptos Display", size: 18, bold: true, color: { argb: "FFFFFFFF" } };
-    worksheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF17324D" } };
-    worksheet.getCell("A1").alignment = { vertical: "middle" };
-    worksheet.getRow(1).height = 38;
-
-    worksheet.mergeCells(2, 1, 2, columnCount);
-    worksheet.getCell("A2").value = `Exported ${new Date().toLocaleString()}  |  ${rows.length} services`;
-    worksheet.getCell("A2").font = { name: "Aptos", size: 10, color: { argb: "FF475569" } };
-    worksheet.getCell("A2").alignment = { vertical: "middle" };
-    worksheet.getRow(2).height = 24;
-    worksheet.addRow([]);
-
-    const headerRow = worksheet.addRow(exportColumns.map(({ label }) => label));
-    headerRow.height = 28;
-    headerRow.eachCell((cell) => {
-      cell.font = { name: "Aptos", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2563EB" } };
-      cell.alignment = { vertical: "middle", wrapText: true };
-      cell.border = { bottom: { style: "medium", color: { argb: "FF1D4ED8" } } };
-    });
-
-    worksheet.addRows(rows.map((service) => exportColumns.map(({ value }) => value(service))));
-    worksheet.autoFilter = {
-      from: { row: 4, column: 1 },
-      to: { row: 4, column: columnCount },
-    };
-
-    worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-      if (rowNumber < 5) return;
-      row.eachCell((cell, columnNumber) => {
-        cell.font = { name: "Aptos", size: 10, color: { argb: "FF1E293B" } };
-        cell.alignment = { vertical: "middle", wrapText: columnNumber === 3 || columnNumber === 4 || columnNumber === 9 };
-        cell.fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: rowNumber % 2 === 0 ? "FFF1F5F9" : "FFFFFFFF" },
-        };
-        cell.border = { bottom: { style: "hair", color: { argb: "FFE2E8F0" } } };
-
-        const value = String(cell.value ?? "");
-        const color = cellColors[value];
-        if (color && [6, 7, 8].includes(columnNumber)) {
-          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: color.fill } };
-          cell.font = { name: "Aptos", size: 10, bold: true, color: { argb: color.text } };
-        }
-      });
-    });
-
-    const buffer = await workbook.xlsx.writeBuffer();
-    const blob = new Blob([buffer as BlobPart], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
+    const quoteCsv = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    const csvRows = [
+      exportColumns.map(({ label }) => label),
+      ...rows.map((service) => exportColumns.map(({ value }) => value(service))),
+    ];
+    const blob = new Blob(
+      [`\uFEFF${csvRows.map((row) => row.map(quoteCsv).join(",")).join("\r\n")}`],
+      { type: "text/csv;charset=utf-8" },
+    );
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = managerView ? "manager-services.xlsx" : "services.xlsx";
+    link.download = managerView ? "manager-services.csv" : "services.csv";
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -160,9 +102,9 @@ export function ServiceFilters({
           <input
             type="text"
             aria-label="Search services"
-            placeholder="Search by service ID, reference, commodity or importer"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={managerView ? copy.searchPlaceholder : "Search by service ID, reference, commodity or importer"}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             className={`w-full border border-slate-200 py-2 pl-9 pr-3 text-slate-800 placeholder:text-slate-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-sky-500 ${managerView ? "min-h-10 rounded-md text-sm" : "rounded-lg text-xs"}`}
           />
         </div>
@@ -175,20 +117,15 @@ export function ServiceFilters({
             onChange={(e) => setStatusFilter(e.target.value)}
             className={`appearance-none border border-slate-200 bg-white py-2 pl-8 pr-8 font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500 ${managerView ? "min-h-10 w-full rounded-md text-sm" : "cursor-pointer rounded-lg text-xs"}`}
           >
-            <option value="ALL">All statuses</option>
-            <option value="Draft">Draft</option>
-            <option value="Submitted">Submitted</option>
-            <option value="Under review">Under review</option>
-            <option value="Approved">Approved</option>
-            <option value="In progress">In progress</option>
-            <option value="Needs review">Needs review</option>
-            <option value="Requires customer action">Requires customer action</option>
-            <option value="Pending">Pending</option>
-            <option value="Blocked">Blocked</option>
-            <option value="Completed">Completed</option>
-            <option value="Rejected">Rejected</option>
-            <option value="Cancelled">Cancelled</option>
-            <option value="Delivered">Delivered</option>
+            <option value="ALL">{managerView ? copy.allStatuses : "All statuses"}</option>
+            {(managerView
+              ? ["In progress", "Needs review", "Requires customer action", "Pending", "Completed", "Blocked"]
+              : ["Draft", "Submitted", "Under review", "Approved", "In progress", "Needs review", "Requires customer action", "Pending", "Blocked", "Completed", "Rejected", "Cancelled", "Delivered"]
+            ).map((status) => (
+              <option key={status} value={status}>
+                {managerView ? copy.statuses[status as keyof typeof copy.statuses] : status}
+              </option>
+            ))}
           </select>
           <Filter className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5 pointer-events-none" />
         </div>
@@ -200,9 +137,9 @@ export function ServiceFilters({
           onChange={(e) => setModeFilter(e.target.value)}
           className={`border border-slate-200 bg-white px-3 py-2 font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500 ${managerView ? "min-h-10 w-full rounded-md text-sm" : "cursor-pointer rounded-lg text-xs"}`}
         >
-          <option value="ALL">All modes</option>
-          <option value="Unimodal">Unimodal</option>
-          <option value="Multimodal">Multimodal</option>
+          <option value="ALL">{managerView ? copy.allModes : "All modes"}</option>
+          <option value="Unimodal">{managerView ? copy.unimodal : "Unimodal"}</option>
+          <option value="Multimodal">{managerView ? copy.multimodal : "Multimodal"}</option>
         </select>
 
         {/* Channels Dropdown */}
@@ -212,11 +149,12 @@ export function ServiceFilters({
           onChange={(e) => setChannelFilter(e.target.value)}
           className={`border border-slate-200 bg-white px-3 py-2 font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500 ${managerView ? "min-h-10 w-full rounded-md text-sm" : "cursor-pointer rounded-lg text-xs"}`}
         >
-          <option value="ALL">All channels</option>
-          <option value="Green channel">Green channel</option>
-          <option value="Yellow channel">Yellow channel</option>
-          <option value="Red channel">Red channel</option>
-          <option value="Blue channel">Blue channel</option>
+          <option value="ALL">{managerView ? copy.allChannels : "All channels"}</option>
+          {(["Green channel", "Yellow channel", "Blue channel", "Red channel"] as const).map((channel) => (
+            <option key={channel} value={channel}>
+              {managerView ? copy.channels[channel] : channel}
+            </option>
+          ))}
         </select>
       </div>
 
@@ -231,11 +169,11 @@ export function ServiceFilters({
             className={`flex min-h-10 items-center gap-1.5 border border-slate-200 px-3 py-2 font-semibold text-slate-700 transition-colors hover:bg-slate-50 ${managerView ? "rounded-md text-sm" : "rounded-lg text-xs"}`}
           >
             <Columns className="w-3.5 h-3.5 text-slate-500" />
-            Columns
+            {managerView ? copy.columns : "Columns"}
           </button>
           {columnsOpen && (
             <div id="service-column-options" className="absolute right-0 top-full z-20 mt-2 min-w-48 rounded-lg border border-slate-200 bg-white p-2 shadow-lg">
-              {columnOptions.map(({ key, label }) => (
+              {selectableColumns.map(({ key, label }) => (
                 <label key={key} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50">
                   <input
                     type="checkbox"
@@ -243,7 +181,7 @@ export function ServiceFilters({
                     onChange={() => toggleColumn(key)}
                     className="accent-blue-600"
                   />
-                  {label}
+                  {managerView ? copy[key] : label}
                 </label>
               ))}
             </div>
@@ -251,12 +189,12 @@ export function ServiceFilters({
         </div>
         <button
           type="button"
-          aria-label="Export filtered services as a formatted Excel workbook"
+          aria-label="Export filtered services as CSV"
           onClick={exportServices}
           className={`flex min-h-10 items-center gap-1.5 border border-slate-200 px-3 py-2 font-semibold text-slate-700 transition-colors hover:bg-slate-50 ${managerView ? "rounded-md text-sm" : "rounded-lg text-xs"}`}
         >
           <Download className="w-3.5 h-3.5 text-slate-500" />
-          Export
+          {managerView ? copy.export : "Export"}
         </button>
       </div>
     </div>

@@ -38,7 +38,13 @@ export async function PUT(request: Request, { params }: RouteContext) {
 	return proxyDataEncoderRequest(
 		new Request(request.url, {
 			method: "PUT",
-			headers: { "Content-Type": "application/json" },
+			headers: {
+				"Content-Type": "application/json",
+				Accept: request.headers.get("accept") ?? "application/json",
+				...(request.headers.get("authorization")
+					? { Authorization: request.headers.get("authorization")! }
+					: {}),
+			},
 			body: JSON.stringify(body),
 		}),
 		"PUT",
@@ -57,10 +63,7 @@ export async function GET(request: Request, { params }: RouteContext) {
 	}
 
 	return proxyDataEncoderRequest(
-		new Request(request.url, {
-			method: "GET",
-			headers: { Accept: "application/json" },
-		}),
+		request,
 		"GET",
 		action === "stages"
 			? `${API_ROUTES.shipment.getStages}?shipmentId=${encodeURIComponent(String(id))}`
@@ -92,6 +95,12 @@ export async function POST(request: Request, { params }: RouteContext) {
 	}
 	const forwardedRequest = new Request(request.url, {
 		method: "POST",
+		headers: {
+			Accept: request.headers.get("accept") ?? "application/json",
+			...(request.headers.get("authorization")
+				? { Authorization: request.headers.get("authorization")! }
+				: {}),
+		},
 		body: formData,
 	});
 	return proxyDataEncoderRequest(

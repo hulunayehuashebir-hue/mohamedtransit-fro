@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   ArrowUpDown,
@@ -16,14 +16,12 @@ import {
   ShieldCheck,
   ShieldX,
 } from "lucide-react";
-import CaseExecutorStageActions from "@/components/case-executor/CaseExecutorStageActions";
 import SlaBadge from "@/components/SlaBadge";
-import { useAuthStore } from "@/modules/auth/auth.store";
-import { CaseExecutorEndpoints } from "@/modules/case-Executer/case-executor.endpoint";
 import { useCaseExecutorStore } from "@/modules/case-Executer/case-Executer.store";
 import type { CaseExecutorServiceRecord } from "@/modules/case-Executer/case-Executer.type";
 import { getCaseExecutorServiceCategory } from "@/modules/case-Executer/service-category";
 import { getSLAStatus } from "@/lib/utils";
+import { getCaseExecutorServicesCopy } from "@/features/services/service.copy";
 
 type ServiceStatus =
   | "Draft"
@@ -42,7 +40,7 @@ type ServiceStatus =
   | "Unknown";
 type RiskChannel = "Green channel" | "Yellow channel" | "Red channel" | "Blue channel" | "Unassigned";
 type TransportMode = "Unimodal" | "Multimodal" | "Unknown";
-type ColumnKey = "service" | "importer" | "mode" | "status" | "risk" | "caseExecutor" | "eta" | "sla" | "updated";
+type ColumnKey = "service" | "importer" | "mode" | "status" | "risk" | "eta" | "sla" | "updated";
 type ServiceRowData = {
   id: string;
   shipmentId: string;
@@ -54,7 +52,6 @@ type ServiceRowData = {
   mode: TransportMode;
   status: ServiceStatus;
   riskChannel: RiskChannel;
-  caseExecutor: string;
   eta: string;
   sla: string;
   isOverdue: boolean;
@@ -69,7 +66,6 @@ const columns: Array<{ key: ColumnKey; label: string }> = [
   { key: "mode", label: "Mode" },
   { key: "status", label: "Status" },
   { key: "risk", label: "Risk" },
-  { key: "caseExecutor", label: "Case executor" },
   { key: "eta", label: "ETA" },
   { key: "sla", label: "SLA" },
   { key: "updated", label: "Updated" },
@@ -179,7 +175,6 @@ const toTimestamp = (value: unknown): number | null => {
 
 const normalizeService = (
   record: CaseExecutorServiceRecord,
-  currentUserName: string,
 ): ServiceRowData | null => {
   const rawId = readValue(record, "id", "shipmentId", "serviceId");
   const shipmentId = readText(rawId);
@@ -211,7 +206,6 @@ const normalizeService = (
     mode: normalizeMode(record),
     status,
     riskChannel: normalizeRisk(record),
-    caseExecutor: currentUserName || "—",
     eta: explicitETA === "—" ? "Not provided" : explicitETA,
     sla: sla.label,
     isOverdue: sla.variant === "overdue",
@@ -247,92 +241,37 @@ const riskPriority: RiskChannel[] = [
 
 const escapeCsv = (value: string) => `"${value.replaceAll('"', '""')}"`;
 
-const isRecord = (value: unknown): value is CaseExecutorServiceRecord =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const unwrapServiceDetail = (value: unknown): CaseExecutorServiceRecord | null => {
-  let current = value;
-  for (let depth = 0; depth < 6; depth += 1) {
-    if (!isRecord(current)) return null;
-    let nested: CaseExecutorServiceRecord | undefined;
-    for (const key of ["assignedService", "service", "data", "payload", "response", "result"]) {
-      const candidate = readValue(current, key);
-      if (isRecord(candidate)) {
-        nested = candidate;
-        break;
-      }
-    }
-    if (nested) {
-      current = nested;
-      continue;
-    }
-    return current;
-  }
-  return null;
-};
-
 function AssignedServiceRow({
   row,
   visibleColumns,
+  lang,
+  copy,
 }: {
   row: ServiceRowData;
   visibleColumns: ColumnKey[];
+  lang: string;
+  copy: ReturnType<typeof getCaseExecutorServicesCopy>;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<CaseExecutorServiceRecord | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const count = visibleColumns.length;
-  const rawRiskLevel = detail ? readValue(detail, "riskLevel") : undefined;
-  const currentRiskLevel =
-    typeof rawRiskLevel === "number" || typeof rawRiskLevel === "string"
-      ? rawRiskLevel
-      : null;
-
-  const toggleDetails = async () => {
-    if (expanded) {
-      setExpanded(false);
-      return;
-    }
-    setExpanded(true);
-    if (detail) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await CaseExecutorEndpoints.getAssignedServiceById(row.shipmentId);
-      const serviceDetails = unwrapServiceDetail(result);
-      if (!serviceDetails) {
-        throw new Error("No service details were returned.");
-      }
-      setDetail(serviceDetails);
-    } catch (requestError: unknown) {
-      setError(requestError instanceof Error ? requestError.message : String(requestError));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const refreshDetails = async () => {
-    try {
-      const result = await CaseExecutorEndpoints.getAssignedServiceById(row.shipmentId);
-      const serviceDetails = unwrapServiceDetail(result);
-      if (!serviceDetails) {
-        throw new Error("No service details were returned.");
-      }
-      setDetail(serviceDetails);
-    } catch (requestError: unknown) {
-      setError(requestError instanceof Error ? requestError.message : String(requestError));
-    }
-  };
+  const router = useRouter();
+  const detailHref = `/${lang}/admin/case-Executer/assigned-service/${row.shipmentId}`;
 
   return (
-    <>
-      <tr className="transition-colors hover:bg-slate-50/60">
+      <tr
+        tabIndex={0}
+        onClick={() => router.push(detailHref)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            router.push(detailHref);
+          }
+        }}
+        className="cursor-pointer transition-colors hover:bg-slate-50/60 focus-within:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+      >
         {visibleColumns.includes("service") && (
           <td className="px-4 py-3.5">
-            <button type="button" onClick={() => void toggleDetails()} aria-expanded={expanded} className="font-semibold text-sky-700 hover:underline">
+            <Link href={detailHref} onClick={(event) => event.stopPropagation()} className="font-semibold text-sky-700 hover:underline">
               {row.id}
-            </button>
+            </Link>
             <span className="mt-0.5 block text-[11px] text-slate-500">{row.title}</span>
           </td>
         )}
@@ -342,18 +281,17 @@ function AssignedServiceRow({
             <span className="mt-0.5 block font-mono text-[11px] text-slate-400">{row.importerCode}</span>
           </td>
         )}
-        {visibleColumns.includes("mode") && <td className="px-4 py-3.5 font-medium text-slate-700">{row.mode}</td>}
+        {visibleColumns.includes("mode") && <td className="px-4 py-3.5 font-medium text-slate-700">{row.mode === "Unimodal" ? copy.unimodal : row.mode === "Multimodal" ? copy.multimodal : copy.unknownMode}</td>}
         {visibleColumns.includes("status") && (
           <td className="px-4 py-3.5">
-            <StatusBadge status={row.status} />
+            <StatusBadge status={row.status} label={copy.statusLabels[row.status]} />
           </td>
         )}
         {visibleColumns.includes("risk") && (
           <td className="px-4 py-3.5">
-            <RiskBadge risk={row.riskChannel} />
+            <RiskBadge risk={row.riskChannel} label={copy.riskLabels[row.riskChannel]} />
           </td>
         )}
-        {visibleColumns.includes("caseExecutor") && <td className="px-4 py-3.5 font-medium text-slate-800">{row.caseExecutor}</td>}
         {visibleColumns.includes("eta") && <td className="px-4 py-3.5 text-slate-700">{row.eta}</td>}
         {visibleColumns.includes("sla") && (
           <td className="px-4 py-3.5">
@@ -362,67 +300,10 @@ function AssignedServiceRow({
         )}
         {visibleColumns.includes("updated") && <td className="px-4 py-3.5 text-slate-400">{row.updated}</td>}
       </tr>
-      {expanded && (
-        <tr>
-          <td colSpan={count} className="bg-slate-50 px-4 py-3">
-            {loading ? (
-              <p role="status" className="flex items-center gap-2 text-sm text-slate-500">
-                <LoaderCircle className="size-4 animate-spin" /> Loading service details…
-              </p>
-            ) : error ? (
-              <p role="alert" className="text-sm text-rose-700">{error}</p>
-            ) : detail ? (
-              <div>
-                <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  <div>
-                    <dt className="text-xs text-slate-500">Status</dt>
-                    <dd className="mt-1"><StatusBadge status={row.status} /></dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">Risk</dt>
-                    <dd className="mt-1"><RiskBadge risk={row.riskChannel} /></dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">ETA</dt>
-                    <dd className="mt-1 text-sm font-medium text-slate-800">{row.eta}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">SLA</dt>
-                    <dd className="mt-1"><SlaBadge dueDate={row.dueDate} status={row.status} /></dd>
-                  </div>
-                  {Object.entries(detail)
-                    .filter(([key, value]) =>
-                      value !== null &&
-                      value !== undefined &&
-                      value !== "" &&
-                      !["status", "risklevel", "dueat", "sladueat", "duedate", "eta", "estimatedarrival", "expectedarrival"].includes(key.toLowerCase()),
-                    )
-                    .map(([key, value]) => (
-                      <div key={key} className="min-w-0">
-                        <dt className="text-xs capitalize text-slate-500">{key.replace(/([a-z0-9])([A-Z])/g, "$1 $2")}</dt>
-                        <dd className="mt-1 break-words text-sm font-medium text-slate-800">
-                          {typeof value === "object" ? JSON.stringify(value) : String(value)}
-                        </dd>
-                      </div>
-                    ))}
-                </dl>
-                <CaseExecutorStageActions
-                  shipmentId={row.shipmentId}
-                  currentRiskLevel={currentRiskLevel}
-                  serviceDetails={detail}
-                  currentStatus={readValue(detail, "status")}
-                  onUpdated={refreshDetails}
-                />
-              </div>
-            ) : null}
-          </td>
-        </tr>
-      )}
-    </>
   );
 }
 
-function StatusBadge({ status }: { status: ServiceStatus }) {
+function StatusBadge({ status, label }: { status: ServiceStatus; label: string }) {
   const appearance: Record<ServiceStatus, string> = {
     "In progress": "border-sky-200 bg-sky-50 text-sky-700",
     "Needs review": "border-amber-200 bg-amber-50 text-amber-800",
@@ -439,10 +320,10 @@ function StatusBadge({ status }: { status: ServiceStatus }) {
     Rejected: "border-rose-200 bg-rose-50 text-rose-700",
     Unknown: "border-slate-200 bg-slate-100 text-slate-700",
   };
-  return <span className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium ${appearance[status]}`}>{status}</span>;
+  return <span className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium ${appearance[status]}`}>{label}</span>;
 }
 
-function RiskBadge({ risk }: { risk: RiskChannel }) {
+function RiskBadge({ risk, label }: { risk: RiskChannel; label: string }) {
   const appearance: Record<RiskChannel, string> = {
     "Green channel": "border-emerald-200 bg-emerald-50 text-emerald-800",
     "Yellow channel": "border-amber-200 bg-amber-50 text-amber-900",
@@ -454,14 +335,15 @@ function RiskBadge({ risk }: { risk: RiskChannel }) {
   return (
     <span className={`inline-flex items-center gap-1 rounded border px-2.5 py-0.5 text-xs font-medium ${appearance[risk]}`}>
       <Icon className="size-3.5" />
-      {risk}
+      {label}
     </span>
   );
 }
 
-export default function CaseExecutorServicesPage() {
+function CaseExecutorServicesContent() {
   const params = useParams();
   const lang = typeof params.lang === "string" ? params.lang : "en";
+  const copy = getCaseExecutorServicesCopy(lang);
   const searchParams = useSearchParams();
   const categoryFilter = searchParams.get("category") ?? "";
   const routeSearchFilter = searchParams.get("search") ?? "";
@@ -469,15 +351,6 @@ export default function CaseExecutorServicesPage() {
   const loading = useCaseExecutorStore((state) => state.assignedServicesLoading);
   const error = useCaseExecutorStore((state) => state.assignedServicesError);
   const fetchAssignedServices = useCaseExecutorStore((state) => state.fetchAssignedServices);
-  const user = useAuthStore((state) => state.user);
-  const isHydrated = useSyncExternalStore(
-    () => () => {},
-    () => true,
-    () => false,
-  );
-  const currentUserName = isHydrated
-    ? [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.username || ""
-    : "";
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [modeFilter, setModeFilter] = useState("ALL");
@@ -492,9 +365,9 @@ export default function CaseExecutorServicesPage() {
 
   const mappedServices = useMemo(
     () => services
-      .map((record) => normalizeService(record, currentUserName))
+      .map((record) => normalizeService(record))
       .filter((record): record is ServiceRowData => record !== null),
-    [currentUserName, services],
+    [services],
   );
 
   const filteredServices = useMemo(() => {
@@ -508,7 +381,6 @@ export default function CaseExecutorServicesPage() {
         row.title,
         row.importerName,
         row.importerCode,
-        row.caseExecutor,
       ].some((value) => value.toLowerCase().includes(query))) &&
       (!routeQuery || [
         row.id,
@@ -560,7 +432,6 @@ export default function CaseExecutorServicesPage() {
       { label: "Mode", value: (row) => row.mode },
       { label: "Status", value: (row) => row.status },
       { label: "Risk", value: (row) => row.riskChannel },
-      { label: "Case executor", value: (row) => row.caseExecutor },
       { label: "ETA", value: (row) => row.eta },
       { label: "SLA", value: (row) => row.sla },
       { label: "Updated", value: (row) => row.updated },
@@ -583,9 +454,9 @@ export default function CaseExecutorServicesPage() {
     <div className="mx-auto max-w-[1400px] space-y-5 font-sans text-slate-800">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <span className="block text-xs font-semibold uppercase tracking-wider text-slate-500">Case register</span>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">Assigned services</h1>
-          <p className="mt-1 text-sm text-slate-500">The cases assigned to you, ordered by what needs attention first.</p>
+          <span className="block text-xs font-semibold uppercase tracking-wider text-slate-500">{copy.caseRegister}</span>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">{copy.title}</h1>
+          <p className="mt-1 text-sm text-slate-500">{copy.subtitle}</p>
         </div>
         <button
           type="button"
@@ -595,7 +466,7 @@ export default function CaseExecutorServicesPage() {
           className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
         >
           <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh
+          {copy.refresh}
         </button>
       </header>
 
@@ -618,7 +489,7 @@ export default function CaseExecutorServicesPage() {
             <Search className="absolute left-3 top-3 size-4 text-slate-400" />
             <input
               aria-label="Search services"
-              placeholder="Search by service ID, reference, commodity or importer"
+              placeholder={copy.searchPlaceholder}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-xs text-slate-800 placeholder:text-slate-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-sky-500"
@@ -626,26 +497,26 @@ export default function CaseExecutorServicesPage() {
           </div>
           <div className="relative">
             <Filter className="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-slate-400" />
-            <select aria-label="Filter by status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="appearance-none rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-8 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500">
-              <option value="ALL">All statuses</option>
-              {["Draft", "Submitted", "Under review", "Approved", "In progress", "Needs review", "Requires customer action", "Pending", "Blocked", "Completed", "Rejected", "Cancelled", "Delivered", "Unknown"].map((status) => <option key={status}>{status}</option>)}
+            <select aria-label={copy.filterStatus} value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="appearance-none rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-8 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500">
+              <option value="ALL">{copy.allStatuses}</option>
+              {["Draft", "Submitted", "Under review", "Approved", "In progress", "Needs review", "Requires customer action", "Pending", "Blocked", "Completed", "Rejected", "Cancelled", "Delivered", "Unknown"].map((status) => <option key={status} value={status}>{copy.statusLabels[status as ServiceStatus]}</option>)}
             </select>
           </div>
-          <select aria-label="Filter by transport mode" value={modeFilter} onChange={(event) => setModeFilter(event.target.value)} className="cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500">
-            <option value="ALL">All modes</option>
-            <option value="Unimodal">Unimodal</option>
-            <option value="Multimodal">Multimodal</option>
-            <option value="Unknown">Unknown</option>
+          <select aria-label={copy.filterMode} value={modeFilter} onChange={(event) => setModeFilter(event.target.value)} className="cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500">
+            <option value="ALL">{copy.allModes}</option>
+            <option value="Unimodal">{copy.unimodal}</option>
+            <option value="Multimodal">{copy.multimodal}</option>
+            <option value="Unknown">{copy.unknownMode}</option>
           </select>
-          <select aria-label="Filter by risk channel" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)} className="cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500">
-            <option value="ALL">All channels</option>
-            {["Green channel", "Yellow channel", "Red channel", "Blue channel", "Unassigned"].map((risk) => <option key={risk}>{risk}</option>)}
+          <select aria-label={copy.filterRisk} value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)} className="cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500">
+            <option value="ALL">{copy.allChannels}</option>
+            {["Green channel", "Yellow channel", "Red channel", "Blue channel", "Unassigned"].map((risk) => <option key={risk} value={risk}>{copy.riskLabels[risk as RiskChannel]}</option>)}
           </select>
         </div>
         <div className="flex w-full items-center justify-end gap-2 lg:w-auto">
           <div className="relative">
             <button type="button" aria-controls="executor-service-columns" aria-expanded={columnsOpen} onClick={() => setColumnsOpen((open) => !open)} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50">
-              <Columns className="size-3.5 text-slate-500" /> Columns
+              <Columns className="size-3.5 text-slate-500" /> {copy.columnsLabel}
             </button>
             {columnsOpen && (
               <div id="executor-service-columns" className="absolute right-0 top-full z-20 mt-2 min-w-48 rounded-lg border border-slate-200 bg-white p-2 shadow-lg">
@@ -659,7 +530,7 @@ export default function CaseExecutorServicesPage() {
             )}
           </div>
           <button type="button" onClick={exportServices} aria-label="Export filtered services as CSV" className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50">
-            <Download className="size-3.5 text-slate-500" /> Export
+            <Download className="size-3.5 text-slate-500" /> {copy.exportLabel}
           </button>
         </div>
       </div>
@@ -676,31 +547,31 @@ export default function CaseExecutorServicesPage() {
           <table className="w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/50 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                {columns.filter(({ key }) => visibleColumns.includes(key)).map(({ key, label }) => (
+                {columns.filter(({ key }) => visibleColumns.includes(key)).map(({ key }) => (
                   <th key={key} className="px-4 py-3">
                     {key === "updated" ? (
                       <button
                         type="button"
                         onClick={() => setSort((current) => current === "priority" || current === "desc" ? "asc" : "desc")}
-                        aria-label={`Sort updated date ${sort === "asc" ? "newest first" : "oldest first"}`}
+                        aria-label={`${copy.updated} ${sort === "asc" ? "newest first" : "oldest first"}`}
                         className="flex items-center gap-1"
                       >
-                        {label} <ArrowUpDown className="size-3 text-slate-400" />
+                        {copy[key]} <ArrowUpDown className="size-3 text-slate-400" />
                       </button>
-                    ) : label}
+                    ) : copy[key]}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs">
               {loading && !mappedServices.length ? (
-                <tr><td colSpan={visibleColumns.length} className="px-4 py-10 text-center text-sm text-slate-500"><span role="status" className="inline-flex items-center gap-2"><LoaderCircle className="size-4 animate-spin" />Loading assigned services…</span></td></tr>
+                <tr><td colSpan={visibleColumns.length} className="px-4 py-10 text-center text-sm text-slate-500"><span role="status" className="inline-flex items-center gap-2"><LoaderCircle className="size-4 animate-spin" />{copy.loading}</span></td></tr>
               ) : sortedServices.length ? (
-                sortedServices.map((row) => <AssignedServiceRow key={row.shipmentId} row={row} visibleColumns={visibleColumns} />)
+                sortedServices.map((row) => <AssignedServiceRow key={row.shipmentId} row={row} visibleColumns={visibleColumns} lang={lang} copy={copy} />)
               ) : (
                 <tr>
                   <td colSpan={visibleColumns.length} className="px-4 py-10 text-center text-sm text-slate-500">
-                    {error ? "Assigned services could not be loaded." : mappedServices.length ? "No services match your filters." : "No services are assigned to you."}
+                    {error ? copy.loadError : mappedServices.length ? copy.noMatches : copy.noServices}
                   </td>
                 </tr>
               )}
@@ -708,10 +579,18 @@ export default function CaseExecutorServicesPage() {
           </table>
         </div>
         <div className="flex items-center justify-between border-t border-slate-100 p-4 text-xs text-slate-500">
-          <span>Showing {sortedServices.length} of {mappedServices.length} services</span>
+          <span>{copy.showing} {sortedServices.length} {copy.of} {mappedServices.length} {copy.services}</span>
           <span>Page 1 of 1</span>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function CaseExecutorServicesPage() {
+  return (
+    <Suspense fallback={<div role="status" className="p-6 text-sm text-slate-500">Loading assigned services...</div>}>
+      <CaseExecutorServicesContent />
+    </Suspense>
   );
 }

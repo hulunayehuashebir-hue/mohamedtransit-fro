@@ -44,6 +44,7 @@ export const API_ROUTES = {
     approveCustomer: "/Assessor/ApproveCustomer",
     verifyCustomerDocument: "/Assessor/VerifyCustomerDocument",
     downloadCustomerDocument: "/Assessor/DownloadCustomerDocument",
+    updateRiskChannel: "/Assessor/UpdateRiskChannel",
     getPendingServices: "/Assessor/GetPendingServiceReviews",
     getPendingServiceReviews: "/Assessor/GetPendingServiceReviews",
     getServiceDetails: (id: number | string) =>
@@ -72,6 +73,31 @@ export const API_ROUTES = {
     getDashboard: "/Manager/GetDashboard",
     getReportsAnalytics: "/Manager/GetReportsAnalytics",
     assignExecutor: "/Manager/AssignExecutor",
+    serviceWorkspace: (serviceId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}`,
+    updateServiceStage: (serviceId: string | number, stageId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/stages/${encodeURIComponent(String(stageId))}/update`,
+    uploadStageDocument: (serviceId: string | number, stageId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/stages/${encodeURIComponent(String(stageId))}/documents`,
+    downloadStageDocument: (
+      serviceId: string | number,
+      stageId: string | number,
+      documentId: string | number,
+    ) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/stages/${encodeURIComponent(String(stageId))}/documents/${encodeURIComponent(String(documentId))}`,
+    serviceDiscussions: (serviceId: string | number, stageId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/stages/${encodeURIComponent(String(stageId))}/discussions`,
+    assignServiceExecutor: (serviceId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/assign-executor`,
+    assignServiceAssessor: (serviceId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/assign-assessor`,
+    workspaceEscalateService: (serviceId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/escalate`,
+    workspaceNotifyImporter: (serviceId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/notify-importer`,
+    messageServiceImporter: (serviceId: string | number) =>
+      `/Manager/services/${encodeURIComponent(String(serviceId))}/message-importer`,
+    getAvailableStaff: "/Manager/staff",
     getServiceById: (serviceId: string | number) =>
       `/Manager/GetServiceById/${encodeURIComponent(String(serviceId))}`,
     getStageDocuments: "/Manager/GetStageDocuments",
@@ -97,6 +123,12 @@ export const API_ROUTES = {
     getDashboard: "/CaseExecutor/GetDashboard",
     getAssignedServices: "/CaseExecutor/GetAssignedServices",
     getAssignedServiceById: "/CaseExecutor/GetAssignedServiceById",
+    getWorkspace: (serviceIdOrCode: string | number) =>
+      `/CaseExecutor/services/${encodeURIComponent(String(serviceIdOrCode))}`,
+    getWorkspaceDiscussions: (serviceIdOrCode: string | number, stageId: string | number) =>
+      `/CaseExecutor/services/${encodeURIComponent(String(serviceIdOrCode))}/stages/${encodeURIComponent(String(stageId))}/discussions`,
+    uploadWorkspaceStageDocument: (serviceIdOrCode: string | number, stageId: string | number) =>
+      `/CaseExecutor/services/${encodeURIComponent(String(serviceIdOrCode))}/stages/${encodeURIComponent(String(stageId))}/documents`,
     uploadAssignedServiceDocument: "/Document/UploadServiceDocument",
     deleteAssignedDocument: "/CaseExecutor/DeleteAssignedDocument",
     verifyAssignedDocument: "/CaseExecutor/VerifyAssignedDocument",

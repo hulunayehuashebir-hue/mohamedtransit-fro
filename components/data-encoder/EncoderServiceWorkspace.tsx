@@ -29,6 +29,7 @@ import useAuthStore from "@/modules/auth/auth.store";
 import { DataEncoderEndpoints } from "@/modules/dataencoder/data-encoder.endpoint";
 import { normalizeEncoderServiceMode } from "@/modules/dataencoder/service-mode";
 import EncoderSectionLayout from "@/components/data-encoder/EncoderSectionLayout";
+import { getManagerServicesCopy, getCaseExecutorServicesCopy } from "@/features/services/service.copy";
 
 type DataRecord = Record<string, unknown>;
 type WorkspaceTab = "stage" | "documents" | "discussion" | "consignment";
@@ -177,7 +178,18 @@ const readStages = (value: unknown, mode: unknown): StageRecord[] =>
 	unwrapRecords(value, ["stages", "items", "records", "rows", "results"])
 		.map((stage, index) => {
 			const stageInfo = findValue(stage, "stage");
-			const id = readText(findValue(stage, "id", "serviceStageId", "shipmentStageId", "stageExecutionId"));
+			const id = getNumericId(findValue(
+				stage,
+				"workflowStageId",
+				"stageExecutionId",
+				"serviceStageId",
+				"shipmentStageId",
+				"stageId",
+				"id",
+			));
+			if (!id) {
+				throw new Error(`Workflow stage ${index + 1} is missing a valid workflow stage ID.`);
+			}
 			const order = Number(findValue(stage, "order", "stageOrder", "sequence")) || index + 1;
 			const inferredName = readText(
 				findValue(stage, "stageName", "name"),
@@ -215,6 +227,10 @@ const mapDocument = (document: DataRecord, index: number): ServiceDocument => ({
 	...document,
 	id: readText(findValue(document, "documentId", "id", "attachmentId")) || `document-${index + 1}`,
 	documentIdValue: readText(findValue(document, "documentId", "id", "attachmentId")) || undefined,
+	stageId: readText(
+		findValue(document, "workflowStageId", "serviceStageId", "stageId", "stageExecutionId"),
+		findRecordValue(findValue(document, "serviceStage", "stage"), "workflowStageId", "serviceStageId", "stageId", "stageExecutionId", "id"),
+	) || undefined,
 	name: readText(findValue(document, "fileName", "documentName", "name", "title", "originalFileName")) || `Document ${index + 1}`,
 });
 
@@ -384,6 +400,9 @@ export default function EncoderServiceWorkspace() {
 	const params = useParams<Record<string, string | string[]>>();
 	const pathname = usePathname();
 	const router = useRouter();
+	const locale = pathname.split("/")[1] === "am" ? "am" : "en";
+	const copy = getManagerServicesCopy(locale);
+	const encoderCopy = getCaseExecutorServicesCopy(locale);
 	const searchRef = useRef<HTMLInputElement>(null);
 	const uploadInputRef = useRef<HTMLInputElement>(null);
 	const previewUploadRef = useRef<HTMLInputElement>(null);
@@ -424,6 +443,7 @@ export default function EncoderServiceWorkspace() {
 	const [messageError, setMessageError] = useState<string | null>(null);
 	const [messageDrawerOpen, setMessageDrawerOpen] = useState(false);
 	const [uploading, setUploading] = useState(false);
+	const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
 	const [previewUploading, setPreviewUploading] = useState(false);
 	const [previewUploadError, setPreviewUploadError] = useState<string | null>(null);
 	const [uploadRequirement, setUploadRequirement] = useState("");
@@ -663,10 +683,12 @@ export default function EncoderServiceWorkspace() {
 		: undefined;
 	const workflowName = normalizeEncoderServiceMode(rawMode) || readText(rawMode) || "Not specified";
 	const riskGuidance = riskLabel.toLowerCase().includes("yellow")
-		? "Documentary review required before release. Assessor sign-off is mandatory."
+		? copy.yellowRisk
 		: riskLabel.toLowerCase().includes("red")
-			? "Full physical inspection and verification are required before release."
-			: "Routine handling. Post-clearance audit may apply.";
+			? copy.redRisk
+			: riskLabel.toLowerCase().includes("blue")
+				? copy.blueRisk
+				: copy.greenRisk;
 	const serviceStatus = normalizeServiceStatus(service ? findValue(service, "status", "serviceStatus", "approvalStatus", "recordStatus") : "");
 	const serviceStatusTone = /complete|approv|deliver/i.test(serviceStatus)
 		? "border-emerald-200 bg-emerald-50 text-emerald-800"
@@ -683,7 +705,10 @@ export default function EncoderServiceWorkspace() {
 	const destination = service ? readText(findValue(service, "destination", "destinationName", "assignedHub")) : "";
 	const transitPort = service ? readText(findValue(service, "transitPort", "transitPortName", "transitHub")) : "";
 	const eta = service ? readText(findValue(service, "eta", "estimatedArrival", "arrivalDate", "dueDate")) : "";
-	const etaLabel = /^\d{4}-\d{2}-\d{2}$/.test(eta) ? eta : formatDate(eta);
+	const etaDate = eta ? new Date(eta) : null;
+	const etaLabel = etaDate && !Number.isNaN(etaDate.getTime())
+		? etaDate.toISOString().slice(0, 10)
+		: eta;
 	const vessel = service ? readText(findValue(service, "vessel", "vesselName", "shipName")) : "";
 	const voyage = service ? readText(findValue(service, "voyage", "voyageNumber")) : "";
 	const flightNumber = service ? readText(findValue(service, "flightNumber", "flight", "airwayBillFlightNumber")) : "";
@@ -708,10 +733,10 @@ export default function EncoderServiceWorkspace() {
 		).slice(0, 4);
 	}, [documents, search]);
 	const tabItems: { id: WorkspaceTab; label: string; count?: number }[] = [
-		{ id: "stage", label: "Stage work" },
-		{ id: "documents", label: "Documents", count: documents.length },
-		{ id: "discussion", label: "Discussion", count: displayMessages.length },
-		{ id: "consignment", label: "Consignment" },
+		{ id: "stage", label: copy.stageWork },
+		{ id: "documents", label: copy.documents, count: documents.length },
+		{ id: "discussion", label: copy.discussion, count: displayMessages.length },
+		{ id: "consignment", label: copy.consignment },
 	];
 	const previousNotes = previousStage
 		? readText(findValue(previousStage, "notes", "summary", "remarks", "description"))
@@ -725,6 +750,15 @@ export default function EncoderServiceWorkspace() {
 	const previousDuration = previousStage
 		? readText(findValue(previousStage, "duration", "durationHours", "elapsedTime"))
 		: "";
+	const stageCreatedAt = selectedStage
+		? findValue(selectedStage, "createdAt", "createdDate", "createAt")
+		: undefined;
+	const stageUpdatedAt = selectedStage
+		? findValue(selectedStage, "updatedAt", "updatedDate", "lastUpdated", "lastUpdateDate")
+		: undefined;
+	const stageCompletedAt = selectedStage
+		? findValue(selectedStage, "completedAt", "completedDate", "completionDate")
+		: undefined;
 	const stageRequirements = selectedStage
 		? findValue(selectedStage, "requiredDocuments", "documentRequirements", "requiredDocumentTypes")
 		: undefined;
@@ -747,6 +781,8 @@ export default function EncoderServiceWorkspace() {
 	const isDocumentReceived = (requiredName: string): boolean => {
 		const normalizedRequirement = requiredName.toLowerCase().replaceAll(/[^a-z0-9]+/g, "");
 		return documents.some((document) => {
+			const documentStageId = getNumericId(findValue(document, "workflowStageId", "serviceStageId", "stageId", "stageExecutionId"));
+			if (documentStageId && selectedStage && documentStageId !== selectedStage.id) return false;
 			const documentStatus = readText(findValue(document, "status", "documentStatus", "verificationStatus"))
 				.toLowerCase().replaceAll(/[\s_-]+/g, "");
 			if (["outstanding", "pending", "pendingvalidation", "rejected", "notreceived"].includes(documentStatus)) {
@@ -787,14 +823,16 @@ export default function EncoderServiceWorkspace() {
 
 	const backHref = legacyRoute
 		? `/${pathname.split("/")[1]}/admin/data-encoder/services`
-		: "/encoder/services";
+		: "/en/admin/data-encoder/services";
 
 	const selectService = (item: DataRecord) => {
-		const reference = readText(findPreferredValue(item, "trackingNumber", "serviceNumber", "serviceReference", "serviceCode", "referenceNumber", "id", "serviceId"));
-		if (!reference) return;
+		const serviceId = getNumericId(findPreferredValue(item, "id", "serviceId", "shipmentId"));
+		if (!serviceId) return;
 		setSearchOpen(false);
 		setSearch("");
-		router.push(`/encoder/services/${encodeURIComponent(reference)}`);
+		router.push(legacyRoute
+			? `/${locale}/admin/data-encoder/services/${encodeURIComponent(serviceId)}`
+			: `/encoder/services/${encodeURIComponent(serviceId)}`);
 	};
 
 	const updateAssessment = (key: keyof AssessmentFields, value: string) => {
@@ -917,21 +955,60 @@ export default function EncoderServiceWorkspace() {
 		}
 	};
 
-	const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-		const files = Array.from(event.currentTarget.files ?? []);
+	const selectUploadFile = (file: File | null) => {
+		setActionError(null);
+		if (!file) {
+			setSelectedUploadFile(null);
+			return;
+		}
+		const extensionAllowed = /\.(pdf|jpe?g|png|xlsx)$/i.test(file.name);
+		const mimeAllowed = !file.type || [
+			"application/pdf",
+			"image/jpeg",
+			"image/png",
+			"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		].includes(file.type);
+		if (!extensionAllowed || !mimeAllowed) {
+			setSelectedUploadFile(null);
+			setActionError("Choose a PDF, JPG, PNG, or XLSX document.");
+			return;
+		}
+		if (file.size > 25 * 1024 * 1024) {
+			setSelectedUploadFile(null);
+			setActionError("The document must be 25 MB or smaller.");
+			return;
+		}
+		if (!getNumericId(selectedStage?.id)) {
+			setSelectedUploadFile(null);
+			setActionError("Select a workflow stage with a valid backend workflow stage ID.");
+			return;
+		}
+		setSelectedUploadFile(file);
+	};
+
+	const handleUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+		const file = event.currentTarget.files?.[0] ?? null;
 		event.currentTarget.value = "";
-		if (!files.length || !currentServiceId) return;
+		selectUploadFile(file);
+	};
+
+	const uploadStageDocument = async () => {
+		const stageId = getNumericId(selectedStage?.id);
+		if (!selectedUploadFile || !currentServiceId || !stageId) {
+			setActionError("Select a document and a workflow stage with a valid backend ID before uploading.");
+			return;
+		}
+
 		setUploading(true);
 		setActionError(null);
 		setActionNotice(null);
 		try {
 			const formData = new FormData();
-			files.forEach((file) => formData.append("files", file, file.name));
-			formData.append("DocumentType", uploadRequirement || selectedStage?.name || "Supporting Document");
-			const response = await fetch(`/api/encoder/services/${encodeURIComponent(currentServiceId)}/documents`, {
-				method: "POST",
-				body: formData,
-			});
+			formData.append("File", selectedUploadFile, selectedUploadFile.name);
+			formData.append("ServiceId", currentServiceId);
+			formData.append("ServiceStageId", stageId);
+			formData.append("DocumentType", uploadRequirement || selectedStage?.name || "Supporting document");
+			const response = await DataEncoderEndpoints.uploadStageDocument(formData);
 			const responseText = await response.text();
 			if (!response.ok) {
 				let message = responseText || `Document upload failed (${response.status}).`;
@@ -939,12 +1016,13 @@ export default function EncoderServiceWorkspace() {
 					const responseBody: unknown = JSON.parse(responseText);
 					message = (isRecord(responseBody) ? readText(findValue(responseBody, "message", "detail", "error", "title")) : "") || message;
 				} catch {
-					// Preserve the backend response text when it is not JSON.
+					// Keep the backend response text when it is not JSON.
 				}
 				throw new Error(message);
 			}
+			setSelectedUploadFile(null);
 			setUploadRequirement("");
-			setActionNotice("Document uploaded.");
+			setActionNotice("Document uploaded to the selected workflow stage.");
 			await loadService();
 		} catch (uploadError: unknown) {
 			setActionError(getErrorMessage(uploadError));
@@ -1233,6 +1311,71 @@ export default function EncoderServiceWorkspace() {
 		</div>
 	);
 
+	const renderStageUpload = () => (
+		<section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+			<div className="flex items-start gap-3">
+				<Upload className="mt-0.5 h-5 w-5 shrink-0 text-slate-500" />
+				<div className="min-w-0 flex-1">
+					<h3 className="text-sm font-semibold text-slate-900">{copy.attachDocuments}</h3>
+					<p className="mt-1 text-xs text-slate-500">{encoderCopy.uploadDescription}</p>
+					<label className="mt-3 block text-xs font-medium text-slate-700">
+						{copy.documentType}
+						<select
+							value={uploadRequirement || requiredDocumentNames[0] || selectedStage?.name || "Supporting document"}
+							onChange={(event) => setUploadRequirement(event.target.value)}
+							className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"
+							disabled={!selectedStage || uploading}
+						>
+							<option value="Supporting document">Supporting document</option>
+							{requiredDocumentNames.map((name, index) => (
+								<option key={`${name}-${index}`} value={name}>{name}</option>
+							))}
+							{selectedStage && !requiredDocumentNames.includes(selectedStage.name) && (
+								<option value={selectedStage.name}>{selectedStage.name}</option>
+							)}
+						</select>
+					</label>
+					<div
+						onDragOver={(event) => event.preventDefault()}
+						onDrop={(event) => {
+							event.preventDefault();
+							selectUploadFile(event.dataTransfer.files[0] ?? null);
+						}}
+						className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-slate-300 bg-white p-3"
+					>
+						<div className="min-w-0">
+							<p className="truncate text-xs font-medium text-slate-700">
+								{selectedUploadFile?.name || "Drop a file here or browse"}
+							</p>
+							{selectedUploadFile && (
+								<p className="mt-0.5 text-[10px] text-slate-500">
+									{(selectedUploadFile.size / (1024 * 1024)).toFixed(2)} MB
+								</p>
+							)}
+						</div>
+						<button
+							type="button"
+							onClick={() => uploadInputRef.current?.click()}
+							disabled={!selectedStage || uploading}
+							className="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							{encoderCopy.browseFiles}
+						</button>
+					</div>
+					<button
+						type="button"
+						onClick={() => void uploadStageDocument()}
+						disabled={!selectedUploadFile || !selectedStage || uploading}
+						className="mt-3 inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+					>
+						{uploading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+						{uploading ? encoderCopy.uploading : encoderCopy.uploadDocument}
+					</button>
+				</div>
+			</div>
+		</section>
+	);
+
 	return (
 		<EncoderSectionLayout
 			activeSection="services"
@@ -1313,7 +1456,7 @@ export default function EncoderServiceWorkspace() {
 				<main className="min-w-0">
 					<div className="mx-auto w-full max-w-[1720px] py-5">
 						<Link href={backHref} className="inline-flex items-center gap-2 text-xs font-semibold text-slate-500 transition hover:text-slate-900">
-							<ArrowLeft className="h-4 w-4" /> Back to services
+							<ArrowLeft className="h-4 w-4" /> {copy.backToServices}
 						</Link>
 
 						{loading && (
@@ -1342,7 +1485,7 @@ export default function EncoderServiceWorkspace() {
 											<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
 												<h1 className="font-mono font-bold text-slate-950">{trackingNumber || "Service reference unavailable"}</h1>
 												{declarationReference && <span className="text-slate-400">•</span>}
-												{declarationReference && <span className="font-medium text-slate-500">Internal ref {declarationReference}</span>}
+												{declarationReference && <span className="font-medium text-slate-500">{declarationReference}</span>}
 											</div>
 											<div className="mt-2 flex flex-wrap items-center gap-2">
 												{serviceStatus && <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${serviceStatusTone}`}>{serviceStatus}</span>}
@@ -1360,8 +1503,8 @@ export default function EncoderServiceWorkspace() {
 										</div>
 										<div className="flex min-w-[220px] flex-col gap-2 sm:items-end">
 											<div className="flex w-full justify-between text-[11px] text-slate-500 sm:w-56">
-												<span>{stages.length ? `Stage ${currentStageNumber} of ${stages.length}` : "Stage progress unavailable"}</span>
-												<span className="font-bold text-slate-800">{stages.length ? `${progress}% complete` : "No stage data"}</span>
+												<span>{stages.length ? `${copy.stage} ${currentStageNumber} ${copy.of} ${stages.length}` : "Stage progress unavailable"}</span>
+												<span className="font-bold text-slate-800">{stages.length ? `${progress}% ${copy.complete}` : "No stage data"}</span>
 											</div>
 											<div className="flex w-full gap-1 sm:w-56" role="progressbar" aria-label="Service stage progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
 												{stages.map((stage) => <span key={stage.id} title={`${stage.name}: ${statusLabel(stage.status)}`} className={`h-1.5 min-w-1 flex-1 rounded-full ${stage.status === "completed" ? "bg-emerald-500" : ["in_progress", "needs_review"].includes(stage.status) ? "bg-cyan-500" : "bg-slate-200"}`} />)}
@@ -1381,13 +1524,13 @@ export default function EncoderServiceWorkspace() {
 										)}
 									</div>
 								)}
-								<input ref={uploadInputRef} type="file" multiple className="sr-only" onChange={(event) => void handleUpload(event)} disabled={uploading} />
+								<input ref={uploadInputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.xlsx,application/pdf,image/jpeg,image/png,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="sr-only" onChange={handleUpload} disabled={uploading} />
 								{actionNotice && <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[70] max-w-[min(420px,calc(100vw-2.5rem))] rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800 shadow-lg">{actionNotice}</div>}
 
 								<div className="mt-4 grid min-h-[680px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm xl:grid-cols-[minmax(210px,1fr)_minmax(460px,2fr)_minmax(260px,1fr)]">
 									<aside className="border-b border-slate-200 bg-slate-50/80 p-3 xl:border-b-0 xl:border-r">
 										<div className="flex items-center justify-between px-2 py-2">
-											<h2 className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">{workflowName} workflow</h2>
+											<h2 className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">{workflowName === "Unimodal" ? copy.unimodalWorkflow : workflowName === "Multimodal" ? copy.multimodalWorkflow : `${workflowName} workflow`}</h2>
 											<span className="text-[10px] font-medium text-slate-400">{stages.length} stages</span>
 										</div>
 										{stages.length ? (
@@ -1420,7 +1563,7 @@ export default function EncoderServiceWorkspace() {
 										<div className="border-b border-slate-200 px-4 pt-4 sm:px-5">
 											<div className="flex flex-wrap items-center justify-between gap-3">
 												<div>
-													<p className="text-[9px] font-bold uppercase tracking-[0.15em] text-slate-400">Stage workspace</p>
+													<p className="text-[9px] font-bold uppercase tracking-[0.15em] text-slate-400">{copy.stageWorkspace}</p>
 													<h2 className="mt-1 text-sm font-bold text-slate-900">{selectedStage?.name || "Stage details unavailable"}</h2>
 												</div>
 												{selectedStage && <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${selectedStage.status === "needs_review" ? "bg-amber-100 text-amber-800" : selectedStage.status === "completed" ? "bg-emerald-100 text-emerald-800" : selectedStage.status === "in_progress" ? "bg-cyan-100 text-cyan-800" : "bg-slate-100 text-slate-600"}`}>{statusLabel(selectedStage.status)}</span>}
@@ -1438,7 +1581,7 @@ export default function EncoderServiceWorkspace() {
 											{activeTab === "stage" && (
 												<>
 													<section className="rounded-lg border border-slate-200 bg-slate-50 p-3.5">
-														<h3 className="text-[11px] font-bold text-slate-800">Previous stage summary <span className="font-normal text-slate-500">(Carried forward context)</span></h3>
+														<h3 className="text-[11px] font-bold text-slate-800">{copy.previousStageSummary} <span className="font-normal text-slate-500">({copy.carriedForwardContext})</span></h3>
 														{previousStage ? (
 															<p className="mt-1.5 text-xs leading-5 text-slate-600">
 																<span className="font-semibold">{previousStage.name}</span> — {statusLabel(previousStage.status)}.
@@ -1458,22 +1601,13 @@ export default function EncoderServiceWorkspace() {
 													<section className="rounded-lg border border-slate-200 p-3.5">
 														<div className="flex flex-wrap items-center justify-between gap-2">
 															<div>
-																<h3 className="text-[11px] font-bold text-slate-800">Required documents for this stage</h3>
+																<h3 className="text-[11px] font-bold text-slate-800">{copy.requiredDocuments}</h3>
 																<p className="mt-0.5 text-[10px] text-slate-500">
 																	{requiredDocumentNames.length
-																		? `${receivedRequirementCount} of ${requiredDocumentNames.length} received`
+																		? `${receivedRequirementCount} ${copy.of} ${requiredDocumentNames.length} ${copy.received.toLowerCase()}`
 																		: `${documents.length} document${documents.length === 1 ? "" : "s"} attached to the service record`}
 																</p>
 															</div>
-															<button type="button" onClick={() => {
-																setUploadRequirement(requiredDocumentNames.find((name) =>
-																	!isDocumentReceived(name),
-																) || selectedStage?.name || "Supporting document");
-																uploadInputRef.current?.click();
-															}} disabled={uploading} className={`inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60`}>
-																{uploading ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-																Attach documents
-															</button>
 														</div>
 														{requiredDocumentNames.length ? (
 															<ul className="mt-3 divide-y divide-slate-100">
@@ -1486,7 +1620,7 @@ export default function EncoderServiceWorkspace() {
 																				<span className="truncate">{name}</span>
 																			</span>
 																			<span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-semibold ${received ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-																				{received ? "Received" : "Outstanding"}
+																				{received ? copy.received : copy.outstanding}
 																			</span>
 																		</li>
 																	);
@@ -1500,6 +1634,24 @@ export default function EncoderServiceWorkspace() {
 														{documentsError && <p role="alert" className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-[10px] text-amber-800">{documentsError}</p>}
 														<div className="mt-3 border-t border-slate-100 pt-1">
 															{renderDocuments(documents.slice(0, 3))}
+														</div>
+													</section>
+
+													{renderStageUpload()}
+
+													<section className="rounded-lg border border-slate-200 bg-white p-3.5">
+														<h3 className="text-[11px] font-bold text-slate-800">Stage timestamps</h3>
+														<div className="mt-3 grid gap-3 sm:grid-cols-3">
+															{[
+																{ label: encoderCopy.created, value: stageCreatedAt },
+																{ label: encoderCopy.lastUpdated, value: stageUpdatedAt },
+																{ label: encoderCopy.completed, value: stageCompletedAt },
+															].map(({ label, value }) => (
+																<div key={label} className="border-b border-slate-100 pb-2 sm:border-b-0">
+																	<p className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+																	<p className="mt-1 text-xs font-medium text-slate-700">{formatDate(value)}</p>
+																</div>
+															))}
 														</div>
 													</section>
 
@@ -1567,17 +1719,10 @@ export default function EncoderServiceWorkspace() {
 											{activeTab === "documents" && (
 												<section className="rounded-lg border border-slate-200 p-4">
 													<div className="flex flex-wrap items-center justify-between gap-3">
-														<div><h3 className="text-sm font-bold text-slate-900">Service documents</h3><p className="mt-1 text-xs text-slate-500">Documents attached to the service and its stages.</p></div>
-														<button type="button" onClick={() => {
-															setUploadRequirement(requiredDocumentNames.find((name) =>
-																!isDocumentReceived(name),
-															) || selectedStage?.name || "Supporting document");
-															uploadInputRef.current?.click();
-														}} disabled={uploading} className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-60">
-															<Upload className="h-4 w-4" />{uploading ? "Uploading…" : "Upload documents"}
-														</button>
+														<div><h3 className="text-sm font-bold text-slate-900">{copy.documents}</h3><p className="mt-1 text-xs text-slate-500">Documents attached to the service and its stages.</p></div>
 													</div>
 													{documentsError && <p role="alert" className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">{documentsError}</p>}
+													<div className="mt-4">{renderStageUpload()}</div>
 													{renderDocuments(documents)}
 												</section>
 											)}
@@ -1585,7 +1730,7 @@ export default function EncoderServiceWorkspace() {
 											{activeTab === "discussion" && (
 												<section className="rounded-lg border border-slate-200 p-4">
 													<div className="flex flex-wrap items-center justify-between gap-2">
-														<div><h3 className="text-sm font-bold text-slate-900">Service discussion</h3><p className="mt-1 text-xs text-slate-500">Messages associated with this service.</p></div>
+														<div><h3 className="text-sm font-bold text-slate-900">{copy.discussion}</h3><p className="mt-1 text-xs text-slate-500">Messages associated with this service.</p></div>
 														<button type="button" onClick={() => void fetchServiceMessages(currentServiceId)} className="text-xs font-semibold text-blue-700 hover:text-blue-900">Refresh</button>
 													</div>
 													{messagingError && <p role="alert" className="mt-3 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{messagingError}</p>}
@@ -1601,7 +1746,7 @@ export default function EncoderServiceWorkspace() {
 														{!displayMessages.length && !messagingError && <p className="rounded-lg border border-dashed border-slate-200 p-5 text-center text-xs text-slate-500">No discussion messages were returned for this service.</p>}
 													</div>
 													<form onSubmit={(event) => void handleSendMessage(event)} className="mt-4 border-t border-slate-100 pt-4">
-														<label htmlFor="service-message" className="text-xs font-semibold text-slate-700">Message importer</label>
+														<label htmlFor="service-message" className="text-xs font-semibold text-slate-700">{copy.messageImporter}</label>
 														<textarea id="service-message" rows={3} value={messageText} onChange={(event) => setMessageText(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Write a service-related message…" />
 														{messageError && <p role="alert" className="mt-2 text-xs text-rose-700">{messageError}</p>}
 														<div className="mt-2 flex justify-end"><button type="submit" disabled={messageSending || !importerUserId} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50">{messageSending ? "Sending…" : "Send message"}</button></div>
@@ -1612,7 +1757,7 @@ export default function EncoderServiceWorkspace() {
 
 											{activeTab === "consignment" && (
 												<section className="rounded-lg border border-slate-200 p-4">
-													<div className="flex items-center gap-2"><Ship className="h-4 w-4 text-slate-500" /><h3 className="text-sm font-bold text-slate-900">Consignment details</h3></div>
+													<div className="flex items-center gap-2"><Ship className="h-4 w-4 text-slate-500" /><h3 className="text-sm font-bold text-slate-900">{copy.consignment}</h3></div>
 													<div className="mt-4 grid gap-4 sm:grid-cols-2">
 														{[
 															["Goods description", title],
@@ -1639,8 +1784,8 @@ export default function EncoderServiceWorkspace() {
 									<aside className="space-y-3 border-t border-slate-200 bg-slate-50/60 p-3.5 xl:border-l xl:border-t-0">
 										<section className="rounded-lg border border-slate-200 bg-white p-3.5">
 											<div className="flex items-center justify-between gap-2">
-												<h3 className="text-[11px] font-bold text-slate-800">Importer</h3>
-												<button type="button" onClick={handleMessageOpen} className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[9px] font-semibold text-slate-600 hover:bg-slate-50"><MessageSquare className="h-3 w-3" />Message</button>
+												<h3 className="text-[11px] font-bold text-slate-800">{encoderCopy.importerCard}</h3>
+												<button type="button" onClick={handleMessageOpen} className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[9px] font-semibold text-slate-600 hover:bg-slate-50"><MessageSquare className="h-3 w-3" />{copy.messageImporter}</button>
 											</div>
 											<div className="mt-3 flex items-start gap-2.5">
 												<span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-xs font-bold text-blue-700">{initials(importerName)}</span>
@@ -1654,10 +1799,10 @@ export default function EncoderServiceWorkspace() {
 										</section>
 
 										<section className="rounded-lg border border-slate-200 bg-white p-3.5">
-											<h3 className="text-[11px] font-bold text-slate-800">Assigned staff</h3>
+											<h3 className="text-[11px] font-bold text-slate-800">{copy.assignedStaff}</h3>
 											{[
-												{ label: "Case executor", value: assignedExecutor },
-												{ label: "Valuation & compliance assessor", value: assignedAssessor },
+												{ label: encoderCopy.caseExecutor, value: assignedExecutor },
+												{ label: encoderCopy.assessor, value: assignedAssessor },
 											].map(({ label, value }) => <div key={label} className="mt-3 flex items-center gap-2.5">
 												<span className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-[10px] font-bold text-slate-600">{initials(personName(value))}</span>
 												<div><p className="text-[9px] text-slate-400">{label}</p><p className="text-xs font-semibold text-slate-800">{personName(value) || "Not assigned"}</p></div>
@@ -1665,7 +1810,7 @@ export default function EncoderServiceWorkspace() {
 										</section>
 
 										<section className="rounded-lg border border-slate-200 bg-white p-3.5">
-											<h3 className="text-[11px] font-bold text-slate-800">Risk &amp; compliance</h3>
+											<h3 className="text-[11px] font-bold text-slate-800">{copy.riskCompliance}</h3>
 											{riskLabel ? <div className={`mt-2 rounded-lg border p-2.5 ${riskTone}`}>
 												<p className="flex items-center gap-1.5 text-[10px] font-bold"><ShieldCheck className="h-3.5 w-3.5" />{riskLabel.toLowerCase().includes("channel") ? riskLabel : `${riskLabel} channel`}</p>
 												<p className="mt-1 text-[10px] leading-4">{riskGuidance}</p>
@@ -1673,7 +1818,7 @@ export default function EncoderServiceWorkspace() {
 										</section>
 
 										<section className="rounded-lg border border-slate-200 bg-white p-3.5">
-											<h3 className="text-[11px] font-bold text-slate-800">Recent activity</h3>
+											<h3 className="text-[11px] font-bold text-slate-800">{copy.recentActivity}</h3>
 											{activities.length ? <ol className="mt-3 space-y-3">
 												{activities.map((activity) => {
 													const isAssessmentSubmission = activity.note.startsWith("Assessment & Tax Payment submitted for verification by ");
@@ -1695,9 +1840,13 @@ export default function EncoderServiceWorkspace() {
 										</section>
 
 										<section className="rounded-lg border border-slate-200 bg-white p-3.5">
-											<h3 className="text-[11px] font-bold text-slate-800">Logistics</h3>
+											<h3 className="text-[11px] font-bold text-slate-800">{copy.logistics}</h3>
 											<div className="mt-2 flex gap-2">{flightNumber || carrier ? <Plane className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" /> : <Ship className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />}<div><p className="text-[9px] text-slate-400">{flightNumber || carrier ? "Flight / carrier" : "Vessel / voyage"}</p><p className="mt-0.5 text-[10px] font-medium text-slate-700">{[flightNumber, carrier].filter(Boolean).join(" — ") || [vessel, voyage].filter(Boolean).join(" / ") || "Not provided in service record"}</p></div></div>
-											<div className="mt-2 flex gap-2"><MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" /><div><p className="text-[9px] text-slate-400">Transit route</p><p className="mt-0.5 text-[10px] font-medium text-slate-700">{[origin, transitPort, destination].filter(Boolean).join(" → ") || "Not provided in service record"}</p></div></div>
+											<div className="mt-2 flex gap-2"><MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" /><div><p className="text-[9px] text-slate-400">{copy.origin} → {copy.destination}</p><p className="mt-0.5 text-[10px] font-medium text-slate-700">{[origin, transitPort, destination].filter(Boolean).join(" → ") || "Not provided in service record"}</p></div></div>
+											<div className="mt-2 grid grid-cols-2 gap-2">
+												<div><p className="text-[9px] text-slate-400">{encoderCopy.routeCategory}</p><p className="mt-0.5 text-[10px] font-medium text-slate-700">{readText(findValue(service, "routeCategory", "route")) || "Not provided in service record"}</p></div>
+												<div><p className="text-[9px] text-slate-400">{copy.eta}</p><p className="mt-0.5 text-[10px] font-medium text-slate-700">{etaLabel || "Not provided in service record"}</p></div>
+											</div>
 										</section>
 									</aside>
 								</div>

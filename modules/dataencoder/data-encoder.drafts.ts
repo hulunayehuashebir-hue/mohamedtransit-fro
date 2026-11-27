@@ -14,6 +14,11 @@ export interface EncoderServiceDraft {
 }
 
 const STORAGE_KEY = "mame-transit-encoder-service-drafts";
+export const ENCODER_DRAFTS_UPDATED_EVENT = "encoder-drafts-updated";
+
+const notifyDraftsUpdated = (): void => {
+	window.dispatchEvent(new CustomEvent(ENCODER_DRAFTS_UPDATED_EVENT));
+};
 
 const isServiceDraft = (value: unknown): value is EncoderServiceDraft => {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -56,11 +61,13 @@ export const saveEncoderServiceDraft = (
 		drafts[existingIndex] = draft;
 	}
 	window.localStorage.setItem(STORAGE_KEY, JSON.stringify(drafts));
+	notifyDraftsUpdated();
 };
 
 export const deleteEncoderServiceDraft = (id: string): void => {
 	const drafts = getEncoderServiceDrafts().filter((draft) => draft.id !== id);
 	window.localStorage.setItem(STORAGE_KEY, JSON.stringify(drafts));
+	notifyDraftsUpdated();
 };
 
 export const getEncoderServiceDraft = (

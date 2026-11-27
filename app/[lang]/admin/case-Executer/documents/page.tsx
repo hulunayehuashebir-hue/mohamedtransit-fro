@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AlertCircle, BadgeCheck, Download, Eye, FileText, LoaderCircle, MoreHorizontal, Search, Trash2, UploadCloud, X } from "lucide-react";
 import { API_BASE } from "@/modules/api";
@@ -469,7 +469,7 @@ function StatusBadge({ status }: { status: DocumentStatus }) {
   );
 }
 
-export default function CaseExecutorDocumentsPage() {
+function CaseExecutorDocumentsContent() {
   const searchParams = useSearchParams();
   const fetchAssignedServices = useCaseExecutorStore((state) => state.fetchAssignedServices);
   const [documents, setDocuments] = useState<ExecutorDocument[]>([]);
@@ -1002,5 +1002,13 @@ export default function CaseExecutorDocumentsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function CaseExecutorDocumentsPage() {
+  return (
+    <Suspense fallback={<div role="status" className="p-6 text-sm text-slate-500">Loading documents...</div>}>
+      <CaseExecutorDocumentsContent />
+    </Suspense>
   );
 }

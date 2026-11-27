@@ -9,8 +9,14 @@ import type {
 } from "./customer.type";
 
 export const customerEndpoints = {
-  registerCustomer: (payload: CustomerRegisterPayload) =>
-    service.post(API_ROUTES.customer.register, { ...payload, role: "Customer" }),
+  registerCustomer: (payload: CustomerRegisterPayload, accessToken?: string) =>
+    service.post(
+      API_ROUTES.customer.register,
+      { ...payload, role: "Customer" },
+      accessToken
+        ? { headers: { Authorization: `Bearer ${accessToken}` } }
+        : undefined,
+    ),
   getProfile: () => service.get(API_ROUTES.customer.getProfile),
   getAccountProfile,
   updateProfile: (payload: CustomerUpdateProfilePayload) =>
@@ -25,10 +31,18 @@ export const customerEndpoints = {
     service.put(API_ROUTES.customer.updateInspectionType, payload),
   uploadStageDocument: (payload: FormData) =>
     service.post(API_ROUTES.customer.uploadStageDocument, payload),
+  uploadKycDocument: (payload: FormData) =>
+    fetch("/api/customer/kyc-documents", {
+      method: "POST",
+      credentials: "include",
+      body: payload,
+    }),
 };
 
-export const registerCustomer = (payload: CustomerRegisterPayload) =>
-  customerEndpoints.registerCustomer(payload);
+export const registerCustomer = (
+  payload: CustomerRegisterPayload,
+  accessToken?: string,
+) => customerEndpoints.registerCustomer(payload, accessToken);
 
 export const getCustomerProfile = () => customerEndpoints.getProfile();
 
@@ -53,3 +67,6 @@ export const updateCustomerInspectionType = (payload: CustomerInspectionTypePayl
 
 export const uploadCustomerStageDocument = (payload: FormData) =>
   customerEndpoints.uploadStageDocument(payload);
+
+export const uploadCustomerKycDocument = (payload: FormData) =>
+  customerEndpoints.uploadKycDocument(payload);

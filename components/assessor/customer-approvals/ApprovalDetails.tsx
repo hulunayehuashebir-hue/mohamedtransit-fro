@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import type { ApprovalApplicant } from "@/modules/assessor/assessor.type";
+import type { AssessorCopy } from "@/modules/assessor/assessor.copy";
 import {
   Mail,
   Phone,
@@ -14,25 +15,31 @@ import {
 
 interface ApprovalDetailsProps {
   applicant: ApprovalApplicant;
+  copy: AssessorCopy["customerApprovals"];
   onApprove?: (id?: string, note?: string) => void;
   onRevision?: (id?: string, note?: string) => void;
   onReject?: (id?: string, note?: string) => void;
   onVerifyDocument?: (documentId: string, isVerified: boolean, note: string) => void;
   onDownloadDocument?: (documentId: string, fileName: string) => void;
+  onPreviewDocument?: (documentId: string, fileName: string, fileUrl?: string) => void;
   actionLoading?: boolean;
   documentDownloadId?: string | null;
+  documentPreviewId?: string | null;
   documentActionId?: string | null;
 }
 
 export function ApprovalDetails({
   applicant,
+  copy,
   onApprove,
   onRevision,
   onReject,
   onVerifyDocument,
   onDownloadDocument,
+  onPreviewDocument,
   actionLoading = false,
   documentDownloadId = null,
+  documentPreviewId = null,
   documentActionId = null,
 }: ApprovalDetailsProps) {
   const [note, setNote] = useState("");
@@ -170,7 +177,7 @@ export function ApprovalDetails({
           </div>
           {applicant.verificationNotes && (
             <p className="col-span-2 mt-4 rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm text-amber-900">
-              Previous review note: {applicant.verificationNotes}
+              {copy.previousReviewNote}: {applicant.verificationNotes}
             </p>
           )}
         </div>
@@ -179,15 +186,15 @@ export function ApprovalDetails({
       {/* KYC Document Checklist Card */}
       <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
         <div className="mb-4">
-          <h3 className="text-base font-semibold text-slate-900">KYC document checklist</h3>
+          <h3 className="text-base font-semibold text-slate-900">{copy.checklistTitle}</h3>
           <p className="text-xs text-slate-500">
-            All active documents must be verified and unexpired before approval.
+            {copy.checklistHint}
           </p>
         </div>
 
         {applicant.checklist.length === 0 ? (
           <p className="rounded-lg border border-slate-100 bg-slate-50 p-4 text-sm text-slate-500">
-            No active customer documents were returned by the backend.
+            {copy.noActiveDocuments}
           </p>
         ) : (
           <div className="divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-100">
@@ -205,15 +212,22 @@ export function ApprovalDetails({
                       </p>
                       <p className="mt-1 text-xs text-slate-500">
                         {item.documentType}
-                        {item.isRequired ? " · Required by record" : " · Not marked required"}
+                        {item.isRequired ? ` · ${copy.required}` : ` · ${copy.notRequired}`}
                       </p>
                     </div>
                     <div>{getStatusBadge(item.status)}</div>
                   </div>
                   <div className="grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
-                    <p>Submitted: {item.submittedAt ? new Date(item.submittedAt).toLocaleString() : "Not recorded"}</p>
-                    <p>Expiry: {item.expiryDate ? new Date(item.expiryDate).toLocaleDateString() : "Not recorded"}</p>
+                    <p>{copy.submitted}: {item.submittedAt ? new Date(item.submittedAt).toLocaleString() : copy.notRecorded}</p>
+                    <p>{copy.expiry}: {item.expiryDate ? new Date(item.expiryDate).toLocaleDateString() : copy.notRecorded}</p>
                   </div>
+                  <span className={`inline-flex rounded-md px-2.5 py-1 text-xs font-medium ${
+                    item.isExpired
+                      ? "bg-rose-100 text-rose-800"
+                      : "bg-emerald-100 text-emerald-800"
+                  }`}>
+                    {item.isExpired ? copy.expired : copy.valid}
+                  </span>
                   {item.verificationNotes && (
                     <p className="rounded bg-slate-50 p-2 text-xs text-slate-600">
                       Verification note: {item.verificationNotes}
@@ -221,6 +235,17 @@ export function ApprovalDetails({
                   )}
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap gap-2">
+                      {onPreviewDocument && (
+                        <button
+                          type="button"
+                          onClick={() => onPreviewDocument(item.id, item.name, item.fileUrl)}
+                          disabled={documentPreviewId === item.id || (!hasDocumentId && !item.fileUrl)}
+                          title={!hasDocumentId && !item.fileUrl ? "No preview file is available." : undefined}
+                          className="rounded border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-wait disabled:opacity-50"
+                        >
+                          {documentPreviewId === item.id ? copy.opening : copy.preview}
+                        </button>
+                      )}
                       {onDownloadDocument && (
                         <button
                           type="button"
@@ -229,22 +254,39 @@ export function ApprovalDetails({
                           title={!hasDocumentId ? "This document has no valid backend ID." : undefined}
                           className="rounded border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-wait disabled:opacity-50"
                         >
-                          {documentDownloadId === item.id ? "Downloading…" : "Download file"}
+                          {documentDownloadId === item.id ? copy.downloading : copy.download}
                         </button>
                       )}
-                      {onVerifyDocument && !item.isExpired && (
+                      {!hasDocumentId && item.fileUrl && (
+                        <a
+                          href={item.fileUrl}
+                          download={item.name}
+                          className="rounded border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+                        >
+                          {copy.download}
+                        </a>
+                      )}
+                      {onVerifyDocument && (
                         <button
                           type="button"
-                          onClick={() => onVerifyDocument(item.id, !item.isVerified, note)}
+                          onClick={() => onVerifyDocument(
+                            item.id,
+                            !item.isExpired && !item.isVerified,
+                            item.isExpired && !item.isVerified
+                              ? note.trim() || "Flagged: expired KYC document"
+                              : note,
+                          )}
                           disabled={!hasDocumentId || actionLoading || documentActionId === item.id}
                           title={!hasDocumentId ? "This document has no valid backend ID." : undefined}
                           className="rounded border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-wait disabled:opacity-50"
                         >
                           {documentActionId === item.id
                             ? "Saving…"
-                            : item.isVerified
-                              ? "Mark unverified"
-                              : "Mark verified"}
+                            : item.isExpired && !item.isVerified
+                              ? copy.flagExpired
+                              : item.isVerified
+                                ? copy.unverify
+                                : copy.verify}
                         </button>
                       )}
                     </div>
@@ -259,16 +301,24 @@ export function ApprovalDetails({
       {/* Assessment Decision Card */}
       <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
         <div className="mb-4">
-          <h3 className="text-base font-semibold text-slate-900">Assessment decision</h3>
-          <p className="text-xs text-slate-500">Decision notes are stored by the customer review API.</p>
+          <h3 className="text-base font-semibold text-slate-900">{copy.assessmentTitle}</h3>
+          <p className="text-xs text-slate-500">{copy.assessmentHint}</p>
         </div>
 
         <textarea
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Assessor note — cite the licence, valuation or documentary basis for your decision."
+          placeholder={copy.notePlaceholder}
           className="w-full h-24 p-3 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent resize-none placeholder:text-slate-400"
         />
+
+        {approvalBlocked && (
+          <p role="alert" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+            {copy.approvalBlocked}
+            {hasUnverifiedDocuments ? ` ${copy.unverifiedWarning}` : ""}
+            {hasExpiredDocuments ? ` ${copy.expiredWarning}` : ""}
+          </p>
+        )}
 
         <div className="flex items-center gap-3 mt-4">
           <button
@@ -283,7 +333,7 @@ export function ApprovalDetails({
             className="flex items-center gap-2 px-4 py-2 bg-sky-700 hover:bg-sky-800 text-white rounded-lg text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
             <CheckCircle2 className="w-4 h-4" />
-            Approve importer
+            {copy.approve}
           </button>
           <button
             type="button"
@@ -293,7 +343,7 @@ export function ApprovalDetails({
             title={!note.trim() ? "A revision note is required" : undefined}
           >
             <RotateCcw className="w-4 h-4" />
-            Return for revision
+            {copy.returnRevision}
           </button>
           <button
             type="button"
@@ -302,7 +352,7 @@ export function ApprovalDetails({
             className="flex items-center gap-2 px-4 py-2 border border-slate-200 text-slate-700 hover:bg-slate-50 rounded-lg text-sm font-medium transition-colors"
           >
             <XCircle className="w-4 h-4" />
-            Reject customer
+            {copy.reject}
           </button>
         </div>
       </div>

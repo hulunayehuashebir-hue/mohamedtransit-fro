@@ -15,6 +15,7 @@ import {
   getCustomerAccountProfile,
   updateCustomerProfile,
 } from "@/modules/customer/customer.endpoint";
+import { CustomerKycDocumentsPanel } from "@/features/customer/components/CustomerKycDocumentsPanel";
 
 // Validation Schema for Password Update
 const changePasswordSchema = z
@@ -424,6 +425,8 @@ export default function CustomerProfilePage() {
             )}
           </div>
         </section>
+
+        {shouldLoadCustomerProfile && <CustomerKycDocumentsPanel isAm={isAm} />}
 
         {/* Change Password Section */}
         <section className="rounded border border-slate-200 bg-white p-5 shadow-sm">

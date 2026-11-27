@@ -145,12 +145,6 @@ export default function EncoderIntegratedDashboard() {
         onClose={closeSidebar}
         onSectionClick={handleSectionClick}
         activeSection={activeSection}
-        stats={{
-          draftServices: dashboardData.draftServices,
-          pendingApprovals: dashboardData.pendingServiceApprovals,
-          recentCustomers: dashboardData.recentCustomers.length,
-          recentServices: dashboardData.recentServices.length,
-        }}
       />
 
       {/* Main Content */}

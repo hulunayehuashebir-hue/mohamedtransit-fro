@@ -184,7 +184,7 @@ export default function CaseExecutorRiskCompliancePage() {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <Link
-                      href={`/${lang}/admin/case-Executer/services?search=${encodeURIComponent(item.trackingNumber)}`}
+                      href={`/${lang}/admin/case-Executer/assigned-service/${item.id}`}
                       className="font-semibold text-blue-700 hover:underline"
                     >
                       {item.trackingNumber}
@@ -200,7 +200,7 @@ export default function CaseExecutorRiskCompliancePage() {
                     )}
                   </div>
                   <Link
-                    href={`/${lang}/admin/case-Executer/services?search=${encodeURIComponent(item.trackingNumber)}`}
+                    href={`/${lang}/admin/case-Executer/assigned-service/${item.id}`}
                     aria-label={`Open assigned service ${item.trackingNumber}`}
                     className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-blue-700"
                   >

@@ -75,7 +75,7 @@ export default function AssessorHeader() {
   const fetchAssignedServices = useCaseExecutorStore((state) => state.fetchAssignedServices);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
-  const servicesHref = `/${locale}/admin/case-Executer/services`;
+  const servicesHref = `/${locale}/admin/case-Executer/assigned-service`;
   const documentsHref = `/${locale}/admin/case-Executer/documents`;
   const notificationsHref = `/${locale}/admin/${isCaseExecutor ? "case-Executer" : "assessor"}/notifications`;
   const profileHref = `/${locale}/admin/${isCaseExecutor ? "case-Executer" : "assessor"}/profile`;
@@ -116,9 +116,16 @@ export default function AssessorHeader() {
   };
 
   const openServiceSearch = (service: CaseExecutorServiceRecord) => {
-    const value = readServiceValue(service, "serviceNumber", "trackingNumber", "caseNumber", "id", "serviceId", "shipmentId");
-    if (typeof value !== "string" && typeof value !== "number") return;
-    router.push(`${servicesHref}?search=${encodeURIComponent(String(value))}`);
+    const databaseId = readServiceValue(service, "id", "shipmentId", "serviceId");
+    if ((typeof databaseId === "number" || (typeof databaseId === "string" && /^\d+$/.test(databaseId)))
+      && Number.isSafeInteger(Number(databaseId))
+      && Number(databaseId) > 0) {
+      router.push(`${servicesHref}/${encodeURIComponent(String(databaseId))}`);
+    } else {
+      const code = readServiceValue(service, "serviceNumber", "trackingNumber", "caseNumber");
+      if (typeof code !== "string" && typeof code !== "number") return;
+      router.push(`${servicesHref}?search=${encodeURIComponent(String(code))}`);
+    }
     setSearchOpen(false);
   };
 

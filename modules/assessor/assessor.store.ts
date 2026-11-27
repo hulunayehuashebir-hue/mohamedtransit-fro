@@ -19,6 +19,7 @@ import type {
   PendingServiceReview,
   RecordAssessmentRequest,
   VerifyCustomerDocumentRequest,
+  UpdateAssessorRiskChannelRequest,
 } from './assessor.type';
 
 interface AssessorState {
@@ -52,6 +53,7 @@ interface AssessorState {
   fetchServiceWorklists: () => Promise<void>;
   approveCustomer: (payload: { customerId: number; isApproved: boolean; notes: string | null; returnForRevision?: boolean }) => Promise<CustomerApprovalResult>;
   verifyCustomerDocument: (payload: VerifyCustomerDocumentRequest) => Promise<void>;
+  updateRiskChannel: (payload: UpdateAssessorRiskChannelRequest) => Promise<void>;
   downloadCustomerDocument: (documentId: number) => Promise<Blob>;
   reviewService: (payload: AssessorServiceReviewRequest) => Promise<AssessorReviewedService>;
   escalateService: (payload: EscalateServiceRequest) => Promise<void>;
@@ -383,6 +385,24 @@ export const useAssessorStore = create<AssessorState>((set, get) => ({
     } catch (err: unknown) {
       const message = getErrorMessage(err, 'Failed to update customer document verification');
       set({ error: message, loading: false });
+      throw err;
+    }
+  },
+
+  updateRiskChannel: async (payload) => {
+    if (!Number.isSafeInteger(payload.shipmentId) || payload.shipmentId <= 0) {
+      throw new Error('A valid service ID is required to update its risk channel.');
+    }
+
+    try {
+      await AssessorEndpoints.updateRiskChannel({
+        ...payload,
+        notes: payload.notes?.trim() || null,
+      });
+      await get().fetchDashboard();
+    } catch (err: unknown) {
+      const message = getErrorMessage(err, 'Failed to update the service risk channel.');
+      set({ error: message });
       throw err;
     }
   },

@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useParams } from "next/navigation";
 import { AlertCircle, CheckCircle2, FileUp, LoaderCircle } from "lucide-react";
 import { CustomerPageHeader } from "@/features/customer/components/CustomerPageHeader";
+import { CustomerKycDocumentsPanel } from "@/features/customer/components/CustomerKycDocumentsPanel";
 import { uploadCustomerStageDocument } from "@/modules/customer/customer.endpoint";
 
 interface CustomerService {
@@ -58,6 +60,7 @@ const readError = async (response: Response, fallback: string): Promise<string> 
 };
 
 export default function CustomerDocumentsPage() {
+  const { lang = "en" } = useParams<{ lang: string }>();
   const [services, setServices] = useState<CustomerService[]>([]);
   const [stages, setStages] = useState<CustomerStage[]>([]);
   const [serviceId, setServiceId] = useState("");
@@ -185,6 +188,7 @@ export default function CustomerDocumentsPage() {
             <CheckCircle2 className="h-4 w-4" />Document uploaded successfully.
           </div>
         )}
+        <CustomerKycDocumentsPanel isAm={lang === "am"} />
         <form onSubmit={submitUpload} className="space-y-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="text-sm font-medium text-slate-700">

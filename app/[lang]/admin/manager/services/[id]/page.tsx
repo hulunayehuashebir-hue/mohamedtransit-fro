@@ -6,10 +6,11 @@ import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   AlertCircle,
+  Ban,
   CheckCircle2,
-  Circle,
   Clock3,
   FileText,
+  Flag,
   MapPin,
   MessageSquare,
   LoaderCircle,
@@ -19,6 +20,9 @@ import {
   ShieldCheck,
   Truck,
   UploadCloud,
+  Download,
+  Eye,
+  X,
 } from "lucide-react";
 import { MANAGER_WORKFLOW_STAGE_NAMES } from "@/modules/manager/manager.type";
 import type {
@@ -29,6 +33,7 @@ import type {
   ManagerWorkflowStageStatus,
 } from "@/modules/manager/manager.type";
 import { useManagerStore } from "@/modules/manager/manager.store";
+import { getManagerServicesCopy } from "@/features/services/service.copy";
 
 type DetailTab = "stage" | "documents" | "discussion" | "consignment";
 
@@ -40,6 +45,7 @@ const formatStatus = (value: number | string | null | undefined): string => {
       needsreview: "Needs review",
       inprogress: "In progress",
       notstarted: "Not started",
+      requirescustomeraction: "Requires customer action",
     };
     return knownLabels[normalized] ?? value;
   }
@@ -90,6 +96,62 @@ const formatDate = (value: string | null | undefined): string => {
   return Number.isNaN(date.getTime())
     ? value
     : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+};
+
+const formatDateOnly = (value: string | null | undefined): string => {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+};
+
+const formatRelativeTime = (value: string | null | undefined): string => {
+  if (!value) return "—";
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return value;
+  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000));
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h ago`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  return `${elapsedDays}d ago`;
+};
+
+const formatActivityLabel = (label: string): string =>
+  label
+    .replaceAll(/([A-Za-z])and([A-Z])/g, "$1 and $2")
+    .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replaceAll(/[_-]+/g, " ")
+    .replaceAll(/\bExit and Storage Payment\b/gi, "Exit & Storage Payment")
+    .replaceAll(/\bAssessment and Tax Payment\b/gi, "Assessment & Tax Payment")
+    .replaceAll(/\s+/g, " ")
+    .trim();
+
+const getBlob = (response: unknown): Blob | null => {
+  if (response instanceof Blob) return response;
+  if (typeof response === "object" && response !== null && "data" in response) {
+    const data = response.data;
+    return data instanceof Blob ? data : null;
+  }
+  return null;
+};
+
+const formatDuration = (start: string | null | undefined, end: string | null | undefined): string => {
+  if (!start || !end) return "—";
+  const durationHours = Math.max(0, Math.round((new Date(end).getTime() - new Date(start).getTime()) / 3_600_000));
+  if (!Number.isFinite(durationHours)) return "—";
+  const days = Math.floor(durationHours / 24);
+  const hours = durationHours % 24;
+  return days ? `${days}d ${hours}h` : `${hours}h`;
+};
+
+const formatDurationHours = (hours: number | null | undefined): string => {
+  if (hours === null || hours === undefined || !Number.isFinite(hours)) return "—";
+  const totalHours = Math.max(0, Math.round(hours));
+  const days = Math.floor(totalHours / 24);
+  const remainingHours = totalHours % 24;
+  return days ? `${days}d ${remainingHours}h` : `${remainingHours}h`;
 };
 
 const stageName = (stage: ManagerServiceStage, index: number): string => {
@@ -178,12 +240,23 @@ const getWorkflowStages = (stages: ManagerServiceStage[], isUnimodal: boolean): 
     }
   });
 
-  const unimodalStages = ["localpermission", "arrival", "clearancerequest"].flatMap((name) => {
-    const stage = stageByName.get(name);
-    return stage ? [stage] : [];
+  return [
+    ["localpermission", "Local Permission"],
+    ["arrival", "Arrival"],
+    ["clearancerequest", "Clearance Request"],
+  ].map(([key, name], index) => {
+    const stage = stageByName.get(key);
+    return {
+      ...stage,
+      order: index + 1,
+      name,
+      stageName: name,
+      status: stage?.status ?? "not_started",
+      updated_at: stage?.updated_at ?? null,
+      notes: stage?.notes ?? null,
+      documents: stage?.documents ?? [],
+    };
   });
-
-  return unimodalStages.length ? unimodalStages : stages;
 };
 
 const stageStatus = (stage: ManagerServiceStage): string => {
@@ -193,6 +266,8 @@ const stageStatus = (stage: ManagerServiceStage): string => {
     needs_review: "Needs review",
     in_progress: "In progress",
     not_started: "Not started",
+    blocked: "Blocked",
+    requires_customer_action: "Requires customer action",
   };
   if (typeof value === "string" && Object.hasOwn(normalizedStatusLabels, value)) {
     return normalizedStatusLabels[value as ManagerWorkflowStageStatus];
@@ -205,6 +280,7 @@ const stageStatus = (stage: ManagerServiceStage): string => {
       4: "Completed",
       5: "Blocked",
       6: "Needs review",
+      7: "Requires customer action",
     };
     return knownStatuses[Number(value)] ?? `Status ${value}`;
   }
@@ -213,15 +289,24 @@ const stageStatus = (stage: ManagerServiceStage): string => {
 
 const stageStatusOption = (status: string): string => {
   const normalized = status.toLowerCase().replaceAll(/[\s_-]+/g, "");
-  if (normalized.includes("complete") || normalized.includes("deliver")) return "Completed";
+  if (normalized.includes("requirescustomeraction") || normalized.includes("customeraction")) {
+    return "RequiresCustomerAction";
+  }
   if (normalized.includes("block")) return "Blocked";
+  if (normalized.includes("complete") || normalized.includes("deliver")) return "Completed";
   if (normalized.includes("review")) return "NeedsReview";
-  if (normalized.includes("progress") || normalized.includes("active")
-    || normalized.includes("notstarted") || normalized.includes("draft")) return "Pending";
-  return "Pending";
+  if (normalized.includes("progress") || normalized.includes("active")) return "InProgress";
+  if (normalized.includes("notstarted")) return "NotStarted";
+  return "NotStarted";
 };
 
-const riskChannelOption = (service: ManagerServiceDetail | null): string => {
+const riskChannelOption = (
+  service: ManagerServiceDetail | null,
+  stage?: ManagerServiceStage,
+): string => {
+  const stageRisk = typeof stage?.riskChannel === "string" ? stage.riskChannel.toLowerCase() : "";
+  const stageChannel = ["blue", "green", "yellow", "red"].find((channel) => stageRisk.includes(channel));
+  if (stageChannel) return stageChannel;
   const channel = service?.risk_channel?.toLowerCase();
   if (channel === "blue" || channel === "green" || channel === "yellow" || channel === "red") return channel;
   const risk = typeof service?.riskLevel === "string"
@@ -232,11 +317,6 @@ const riskChannelOption = (service: ManagerServiceDetail | null): string => {
   if (["yellow", "3"].includes(risk)) return "yellow";
   if (["red", "4"].includes(risk)) return "red";
   return "";
-};
-
-const riskLevelForChannel = (channel: string): number | undefined => {
-  const levels: Record<string, number> = { blue: 1, green: 2, yellow: 3, red: 4 };
-  return levels[channel];
 };
 
 const getPositiveIntegerId = (value: string | number | undefined): number | null => {
@@ -251,27 +331,30 @@ const stageTone = (status: string): string => {
   if (normalized.includes("complete") || normalized.includes("deliver")) {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
+  if (normalized.includes("block")) return "border-rose-200 bg-rose-50 text-rose-800";
   if (normalized.includes("progress") || normalized.includes("active")) {
     return "border-sky-200 bg-sky-50 text-sky-800";
   }
   if (normalized.includes("review") || normalized.includes("block")) {
     return "border-amber-200 bg-amber-50 text-amber-800";
   }
+  if (normalized.includes("customer action")) {
+    return "border-violet-200 bg-violet-50 text-violet-800";
+  }
   return "border-slate-200 bg-slate-50 text-slate-600";
 };
 
 const stageIcon = (status: string, isActive = false) => {
   const normalized = status.toLowerCase();
+  if (normalized.includes("block")) return <Ban className="h-5 w-5 text-rose-600" />;
   if (normalized.includes("complete") || normalized.includes("deliver")) {
     return <CheckCircle2 className="h-5 w-5 text-emerald-600" />;
   }
-  if (isActive || normalized.includes("review")) {
-    return <Search className={`h-5 w-5 ${normalized.includes("review") ? "text-amber-600" : "text-sky-600"}`} />;
+  if (isActive || normalized.includes("progress") || normalized.includes("active")) {
+    return <span className="block h-5 w-5 rounded-full border-2 border-sky-600 bg-sky-50" />;
   }
-  if (normalized.includes("progress") || normalized.includes("active")) {
-    return <Clock3 className="h-5 w-5 text-sky-600" />;
-  }
-  return <Circle className="h-5 w-5 text-slate-400" />;
+  if (normalized.includes("review")) return <Search className="h-5 w-5 text-amber-600" />;
+  return <span className="block h-5 w-5 rounded-full border-2 border-dashed border-slate-400" />;
 };
 
 const riskTone = (risk: string): string => {
@@ -295,9 +378,15 @@ function DetailField({ label, value }: { label: string; value: string }) {
 function DocumentsPanel({
   documents,
   error,
+  actionBusy,
+  onPreview,
+  onDownload,
 }: {
   documents: ManagerServiceDocument[];
   error: string | null;
+  actionBusy: string | null;
+  onPreview: (document: ManagerServiceDocument) => void;
+  onDownload: (document: ManagerServiceDocument) => void;
 }) {
   if (!documents.length) {
     return (
@@ -323,7 +412,7 @@ function DocumentsPanel({
       )}
       <ul className="divide-y divide-slate-100 rounded-xl border border-slate-200">
         {documents.map((document, index) => {
-          const name = document.originalFileName || document.fileName || `Document ${index + 1}`;
+          const name = document.originalFileName || document.fileName || document.documentName || `Document ${index + 1}`;
           const verified = document.isVerified;
           return (
             <li key={document.id ?? `${name}-${index}`} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
@@ -333,14 +422,36 @@ function DocumentsPanel({
                 </span>
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium text-slate-900">{name}</p>
-                  <p className="mt-0.5 text-xs text-slate-500">{document.documentType || document.mimeType || "Document"} · {formatDate(document.createAt)}</p>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    {document.documentType || document.mimeType || "Document"} · {document.uploadedBy || "Uploader unavailable"} · {formatDate(document.createAt)}
+                  </p>
                 </div>
               </div>
-              <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
-                verified ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-800"
-              }`}>
-                {verified ? "Verified" : "Awaiting verification"}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
+                  verified ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-800"
+                }`}>
+                  {verified ? "Verified" : "Awaiting verification"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onPreview(document)}
+                  disabled={!document.id || actionBusy === String(document.id)}
+                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDownload(document)}
+                  disabled={!document.id || actionBusy === String(document.id)}
+                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download
+                </button>
+              </div>
             </li>
           );
         })}
@@ -351,6 +462,7 @@ function DocumentsPanel({
 
 export default function ManagerServiceDetailPage() {
   const { id, lang } = useParams<{ id: string; lang: string }>();
+  const copy = getManagerServicesCopy(lang);
   const router = useRouter();
   const service = useManagerStore((state) => state.selectedService);
   const loading = useManagerStore((state) => state.serviceDetailLoading);
@@ -369,26 +481,40 @@ export default function ManagerServiceDetailPage() {
   const fetchConsignmentDetails = useManagerStore((state) => state.fetchConsignmentDetails);
   const addStageDiscussion = useManagerStore((state) => state.addStageDiscussion);
   const notifyImporter = useManagerStore((state) => state.notifyImporter);
+  const messageImporter = useManagerStore((state) => state.messageImporter);
   const escalateService = useManagerStore((state) => state.escalateService);
   const staff = useManagerStore((state) => state.staff);
   const staffLoading = useManagerStore((state) => state.staffLoading);
   const staffError = useManagerStore((state) => state.staffError);
   const fetchStaff = useManagerStore((state) => state.fetchStaff);
   const assignExecutor = useManagerStore((state) => state.assignExecutor);
+  const assignAssessor = useManagerStore((state) => state.assignAssessor);
   const updateServiceStage = useManagerStore((state) => state.updateServiceStage);
   const uploadServiceDocument = useManagerStore((state) => state.uploadServiceDocument);
+  const downloadManagerDocument = useManagerStore((state) => state.downloadServiceDocument);
   const [refreshing, setRefreshing] = useState(false);
   const [executorSelection, setExecutorSelection] = useState<{
     serviceId: string;
     executorId: string;
   } | null>(null);
   const [assigningExecutor, setAssigningExecutor] = useState(false);
+  const [assessorSelection, setAssessorSelection] = useState<{
+    serviceId: string;
+    assessorId: string;
+  } | null>(null);
+  const [assigningAssessor, setAssigningAssessor] = useState(false);
+  const [assessorAssignmentFeedback, setAssessorAssignmentFeedback] = useState<{
+    error?: string;
+    success?: string;
+  } | null>(null);
   const [assignmentFeedback, setAssignmentFeedback] = useState<{
     error?: string;
     success?: string;
   } | null>(null);
   const [stageUpload, setStageUpload] = useState<{ stageKey: string; file: File } | null>(null);
   const [stageUploadBusy, setStageUploadBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [documentType, setDocumentType] = useState("");
   const [stageUploadFeedback, setStageUploadFeedback] = useState<{
     stageKey: string;
     error?: string;
@@ -417,11 +543,17 @@ export default function ManagerServiceDetailPage() {
   const [notificationType, setNotificationType] = useState("");
   const [notificationMessage, setNotificationMessage] = useState("");
   const [notificationSubmitting, setNotificationSubmitting] = useState(false);
+  const [showNotification, setShowNotification] = useState(false);
+  const [messageImporterMode, setMessageImporterMode] = useState(false);
   const [notificationFeedback, setNotificationFeedback] = useState<{
     error?: string;
     success?: string;
   } | null>(null);
   const importerMessageRef = useRef<HTMLTextAreaElement | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewName, setPreviewName] = useState("");
+  const [documentActionError, setDocumentActionError] = useState<string | null>(null);
+  const [documentActionBusy, setDocumentActionBusy] = useState<string | null>(null);
   const [showEscalation, setShowEscalation] = useState(false);
   const [escalationReason, setEscalationReason] = useState("");
   const [escalationSubmitting, setEscalationSubmitting] = useState(false);
@@ -434,6 +566,13 @@ export default function ManagerServiceDetailPage() {
     error?: string;
     success?: string;
   } | null>(null);
+  const [actionNotice, setActionNotice] = useState("");
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
 
   // ሰርቪሱ በትክክል ሎድ አድርጎ ሳለ "User with ID '0' was not found" የሚል ያልተገባ ስህተት ባነር እንዳይመጣ ማጣሪያ
   const displayError =
@@ -446,6 +585,10 @@ export default function ManagerServiceDetailPage() {
   const workflowStages = service ? getWorkflowStages(service.stages, isUnimodal) : [];
   const displayStageName = (stage: ManagerServiceStage, index: number) =>
     isUnimodal ? unimodalStageName(stage, index) : multimodalStageName(stage, index);
+  const localizedStageName = (stage: ManagerServiceStage, index: number) =>
+    (isUnimodal ? copy.unimodalStages : copy.multimodalStages)[index] ?? displayStageName(stage, index);
+  const localizedStageStatus = (status: string) =>
+    copy.statuses[status as keyof typeof copy.statuses] ?? status;
   const defaultActiveStage = workflowStages.findIndex((stage) => {
     const normalized = stageStatus(stage).toLowerCase().replaceAll(/[\s_-]+/g, "");
     return normalized.includes("inprogress") || normalized.includes("active") || normalized.includes("needsreview");
@@ -473,11 +616,24 @@ export default function ManagerServiceDetailPage() {
       && !member.isAccountLocked
       && hasExecutorRole;
   });
+  const eligibleAssessors = staff.filter((member) => {
+    const roleNames = [...(member.roleNames ?? []), ...(member.assignedRoles ?? []).map((role) => role.roleName)];
+    const hasAssessorRole = roleNames.some((role) => role.toLowerCase().replaceAll(/[^a-z]/g, "").includes("assessor"));
+    return member.isActive === true
+      && !member.isAccountLocked
+      && hasAssessorRole;
+  });
   const currentExecutorId = String(service?.assignedCaseExecutorId ?? "");
   const selectedExecutorId = executorSelection?.serviceId === id
     ? executorSelection.executorId
     : eligibleExecutors.some((member) => String(member.id) === currentExecutorId)
       ? currentExecutorId
+      : "";
+  const currentAssessorId = String(service?.assignedAssessorId ?? "");
+  const selectedAssessorId = assessorSelection?.serviceId === id
+    ? assessorSelection.assessorId
+    : eligibleAssessors.some((member) => String(member.id) === currentAssessorId)
+      ? currentAssessorId
       : "";
 
   const serviceIdentifier = getPositiveIntegerId(id) ?? getPositiveIntegerId(service?.id);
@@ -502,7 +658,11 @@ export default function ManagerServiceDetailPage() {
 
   const currentStage = workflowStages[activeStage];
   const currentStageStatus = currentStage ? stageStatus(currentStage) : "Status unavailable";
-  const currentStageExecutionId = currentStage?.stageExecutionId
+  const currentStageStatusLabel = localizedStageStatus(currentStageStatus);
+  const serviceStatusLabel = localizedStageStatus(formatStatus(service?.status));
+  const currentStageExecutionId = currentStage?.workflowStageId
+    ?? currentStage?.stageId
+    ?? currentStage?.stageExecutionId
     ?? currentStage?.serviceStageExecutionId
     ?? currentStage?.executionId
     ?? currentStage?.id;
@@ -528,12 +688,24 @@ export default function ManagerServiceDetailPage() {
     ?? currentStage?.notes
     ?? currentStage?.comments
     ?? "";
-  const stageRiskDraft = stageDrafts[stageDraftKey]?.riskChannel ?? riskChannelOption(service);
+  const stageRiskDraft = stageDrafts[stageDraftKey]?.riskChannel ?? riskChannelOption(service, currentStage);
   const activeStageFeedback = stageFeedback?.stageKey === stageDraftKey ? stageFeedback : null;
   const selectedStageFile = stageUpload?.stageKey === stageDraftKey ? stageUpload.file : null;
   const currentStageUploadFeedback = stageUploadFeedback?.stageKey === stageDraftKey
     ? stageUploadFeedback
     : null;
+  const requiredStageDocuments = currentStage?.requiredDocuments ?? [];
+  const stageDocumentTypes = [...new Set([
+    ...requiredStageDocuments.map((document) => document.documentType),
+    "Supporting document",
+    "Commercial invoice",
+    "Transport document",
+    "Customs permit",
+    "Inspection record",
+  ])];
+  const currentDocumentType = stageDocumentTypes.includes(documentType)
+    ? documentType
+    : stageDocumentTypes[0] ?? "Supporting document";
 
   const importer = service?.importer && Number(service.importer.id) !== 0
     ? service.importer.name || personName(service.importer)
@@ -549,6 +721,8 @@ export default function ManagerServiceDetailPage() {
           Number(service.riskLevel)
         ] ?? "Unassigned")
       : "—");
+  const riskLabel = copy.channels[risk as keyof typeof copy.channels] ?? risk;
+  const modeLabel = mode === "Unimodal" ? copy.unimodal : mode === "Multimodal" ? copy.multimodal : mode;
   const riskDescription = service?.risk_channel_description
     || (riskChannelOption(service) === "yellow"
       ? "Documentary review required before release. Assessor sign-off is mandatory."
@@ -559,26 +733,31 @@ export default function ManagerServiceDetailPage() {
           : riskChannelOption(service) === "blue"
             ? "Fast-track processing applies subject to customs controls."
             : null);
+  const logisticsCarrier = service?.flight
+    ? `${service.flight}${service.carrier ? ` — ${service.carrier}` : ""}`
+    : service?.vessel
+      ? `${service.vessel}${service.voyage ? ` / Voy. ${service.voyage}` : ""}`
+      : service?.carrier || "—";
   const completedStages = workflowStages.filter((stage) => {
     const status = stageStatus(stage).toLowerCase();
     return status.includes("complete") || status.includes("deliver");
   }).length;
   const progress = workflowStages.length
-    ? Math.round(((activeStage + 1) / workflowStages.length) * 100)
+    ? Math.round((completedStages / workflowStages.length) * 100)
     : null;
   const previousStage = activeStage > 0 ? workflowStages[activeStage - 1] : null;
-  const stageDocuments = currentStage?.documents?.length
-    ? currentStage.documents
-    : service?.documents.filter(
-        (document) =>
-          document.stageId !== null &&
-          document.stageId !== undefined &&
-          [currentStage?.id, currentStage?.serviceStageId, currentStage?.stageExecutionId, currentStage?.serviceStageExecutionId, currentStage?.executionId]
-            .some((stageId) => stageId !== undefined && String(document.stageId) === String(stageId)),
-      ) ?? [];
+  const previousStageSummary = currentStage?.previousStageSummary;
+  const previousStageSummaryStatus = previousStageSummary?.status
+    ? formatStatus(previousStageSummary.status)
+    : previousStage
+      ? stageStatus(previousStage)
+      : "";
+  const previousStageSummaryNote = previousStageSummary?.summaryNote
+    || previousStage?.notes
+    || previousStage?.comments;
   const recentActivity = service?.stages
     .flatMap((stage, index) => {
-      const name = displayStageName(stage, index);
+      const name = localizedStageName(stage, index);
       const status = stageStatus(stage);
       const activity = [];
 
@@ -593,9 +772,17 @@ export default function ManagerServiceDetailPage() {
     .filter((activity) => !Number.isNaN(new Date(activity.date).getTime()))
     .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime())
     .slice(0, 5) ?? [];
-  const displayedActivities = serviceActivities.length
-    ? serviceActivities.map((activity) => ({ label: activity.label, date: activity.date ?? "" }))
-    : recentActivity;
+  const displayedActivities = [
+    ...serviceActivities.map((activity) => ({
+      label: activity.label,
+      date: activity.date ?? "",
+      actorName: activity.actorName,
+    })),
+    ...recentActivity,
+  ]
+    .filter((activity) => activity.date && !Number.isNaN(new Date(activity.date).getTime()))
+    .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime())
+    .slice(0, 5);
 
   const assignedStaff: Array<[string, ManagerServiceDetail["assignedCaseExecutor"]]> = service
     ? [
@@ -628,12 +815,12 @@ export default function ManagerServiceDetailPage() {
     }
 
     const shipmentId = getPositiveIntegerId(id) ?? getPositiveIntegerId(service?.id);
-    const stageExecutionId = getPositiveIntegerId(currentStageExecutionId);
+    const stageId = getPositiveIntegerId(currentStageExecutionId);
     if (
       !service ||
       serviceIdentifier === null ||
       shipmentId === null ||
-      stageExecutionId === null
+      stageId === null
     ) {
       setStageFeedback({
         stageKey: stageDraftKey,
@@ -646,11 +833,12 @@ export default function ManagerServiceDetailPage() {
     setStageFeedback(null);
 
     const updatePayload = {
-      shipmentId,
-      shipmentStageId: stageExecutionId,
-      status,
-      notes: stageNotesDraft.trim(),
-      riskLevel: riskLevelForChannel(stageRiskDraft),
+      serviceId: shipmentId,
+      stageId,
+      action: status === "Blocked" ? "block" as const : advance ? "advance" as const : "draft" as const,
+      stageStatus: status,
+      riskChannel: stageRiskDraft,
+      stageNote: stageNotesDraft.trim(),
     };
 
     const updateResult = await updateServiceStage(updatePayload);
@@ -672,6 +860,7 @@ export default function ManagerServiceDetailPage() {
         ...drafts,
         [stageDraftKey]: { status, notes: stageNotesDraft, riskChannel: stageRiskDraft },
       }));
+      setActionNotice(status === "Blocked" ? "Stage blocked." : "Stage changes saved.");
       if (advance && activeStage < workflowStages.length - 1) {
         setSelection({
           serviceId: id,
@@ -705,8 +894,10 @@ export default function ManagerServiceDetailPage() {
         stageId: discussionStageId,
         comment: discussionDraft.trim(),
       });
+      await fetchServiceById(serviceIdentifier);
       setDiscussionDraft("");
       setDiscussionFeedback({ success: "Discussion comment added." });
+      setActionNotice("Discussion comment added.");
     } catch (error: unknown) {
       setDiscussionFeedback({
         error: error instanceof Error ? error.message : "Unable to add discussion comment.",
@@ -726,14 +917,24 @@ export default function ManagerServiceDetailPage() {
     setNotificationSubmitting(true);
     setNotificationFeedback(null);
     try {
-      await notifyImporter({
+      const messagePayload = {
         serviceId: serviceIdentifier,
-        subject: notificationType.trim() || "Service update",
+        subject: notificationType.trim() || (messageImporterMode ? "Service message" : "Service update"),
         message: notificationMessage.trim(),
-      });
+      };
+      if (messageImporterMode) {
+        await messageImporter(messagePayload);
+      } else {
+        await notifyImporter(messagePayload);
+      }
+      await fetchServiceById(serviceIdentifier);
       setNotificationType("");
       setNotificationMessage("");
-      setNotificationFeedback({ success: "Importer notification sent." });
+      setNotificationFeedback({
+        success: messageImporterMode ? "Message sent to importer." : "Importer notification sent.",
+      });
+      setShowNotification(false);
+      setActionNotice(messageImporterMode ? "Message sent to importer." : "Importer notification sent.");
     } catch (error: unknown) {
       setNotificationFeedback({
         error: error instanceof Error ? error.message : "Unable to notify the importer.",
@@ -754,9 +955,11 @@ export default function ManagerServiceDetailPage() {
     setEscalationFeedback(null);
     try {
       await escalateService({ serviceId: serviceIdentifier, reason: escalationReason.trim() });
+      await fetchServiceById(serviceIdentifier);
       setEscalationReason("");
       setShowEscalation(false);
       setEscalationFeedback({ success: "Service escalation submitted." });
+      setActionNotice("Service escalation submitted.");
     } catch (escalationError: unknown) {
       setEscalationFeedback({
         error: escalationError instanceof Error ? escalationError.message : "Unable to escalate this service.",
@@ -773,7 +976,14 @@ export default function ManagerServiceDetailPage() {
       return;
     }
 
-    const acceptedFile = /\.(pdf|jpg|png|xlsx)$/i.test(file.name);
+    const extensionAccepted = /\.(pdf|jpe?g|png|xlsx)$/i.test(file.name);
+    const mimeAccepted = !file.type || [
+      "application/pdf",
+      "image/jpeg",
+      "image/png",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ].includes(file.type);
+    const acceptedFile = extensionAccepted && mimeAccepted;
     if (!acceptedFile) {
       setStageUploadFeedback({ stageKey: stageDraftKey, error: "Choose a PDF, JPG, PNG, or Excel file." });
       setStageUpload(null);
@@ -802,15 +1012,15 @@ export default function ManagerServiceDetailPage() {
 
     const formData = new FormData();
     formData.append("File", selectedStageFile, selectedStageFile.name);
-    formData.append("ShipmentId", String(shipmentId));
-    formData.append("StageId", String(stageId));
-    formData.append("DocumentType", "10");
-    formData.append("Description", `Uploaded for ${displayStageName(currentStage, activeStage)}`);
+    formData.append("ServiceId", String(shipmentId));
+    formData.append("WorkflowStageId", String(stageId));
+    formData.append("DocumentType", currentDocumentType);
 
     setStageUploadBusy(true);
+    setUploadProgress(0);
     setStageUploadFeedback({ stageKey: stageDraftKey });
     try {
-      await uploadServiceDocument(formData);
+      await uploadServiceDocument(formData, setUploadProgress);
       setStageUpload(null);
       setStageUploadFeedback({
         stageKey: stageDraftKey,
@@ -818,6 +1028,7 @@ export default function ManagerServiceDetailPage() {
       });
       if (stageFileInput.current) stageFileInput.current.value = "";
       await fetchServiceById(id);
+      setActionNotice(`${selectedStageFile.name} uploaded successfully.`);
     } catch (uploadError: unknown) {
       setStageUploadFeedback({
         stageKey: stageDraftKey,
@@ -825,6 +1036,7 @@ export default function ManagerServiceDetailPage() {
       });
     } finally {
       setStageUploadBusy(false);
+      setUploadProgress(null);
     }
   };
 
@@ -834,6 +1046,52 @@ export default function ManagerServiceDetailPage() {
       await fetchServiceById(id);
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const previewServiceDocument = async (document: ManagerServiceDocument) => {
+    const documentId = document.id;
+    if (documentId === undefined || documentId === null) return;
+    setDocumentActionBusy(String(documentId));
+    setDocumentActionError(null);
+    try {
+      const stageId = getPositiveIntegerId(document.stageId ?? undefined);
+      if (serviceIdentifier === null || stageId === null) {
+        throw new Error("The document is missing its service or workflow stage ID.");
+      }
+      const blob = getBlob(await downloadManagerDocument(serviceIdentifier, stageId, documentId));
+      if (!blob) throw new Error("The document endpoint did not return a previewable file.");
+      setPreviewName(document.originalFileName || document.fileName || document.documentName || "Service document");
+      setPreviewUrl(URL.createObjectURL(blob));
+    } catch (previewError: unknown) {
+      setDocumentActionError(previewError instanceof Error ? previewError.message : "Unable to preview this document.");
+    } finally {
+      setDocumentActionBusy(null);
+    }
+  };
+
+  const downloadServiceDocument = async (document: ManagerServiceDocument) => {
+    const documentId = document.id;
+    if (documentId === undefined || documentId === null) return;
+    setDocumentActionBusy(String(documentId));
+    setDocumentActionError(null);
+    try {
+      const stageId = getPositiveIntegerId(document.stageId ?? undefined);
+      if (serviceIdentifier === null || stageId === null) {
+        throw new Error("The document is missing its service or workflow stage ID.");
+      }
+      const blob = getBlob(await downloadManagerDocument(serviceIdentifier, stageId, documentId));
+      if (!blob) throw new Error("The document endpoint did not return a downloadable file.");
+      const url = URL.createObjectURL(blob);
+      const link = window.document.createElement("a");
+      link.href = url;
+      link.download = document.originalFileName || document.fileName || document.documentName || "service-document";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (downloadError: unknown) {
+      setDocumentActionError(downloadError instanceof Error ? downloadError.message : "Unable to download this document.");
+    } finally {
+      setDocumentActionBusy(null);
     }
   };
 
@@ -859,6 +1117,7 @@ export default function ManagerServiceDetailPage() {
 
       await fetchServiceById(id);
       setAssignmentFeedback({ success: "Case executor assigned successfully." });
+      setActionNotice("Case executor assigned successfully.");
     } catch (assignmentError: unknown) {
       setAssignmentFeedback({
         error: assignmentError instanceof Error
@@ -870,6 +1129,36 @@ export default function ManagerServiceDetailPage() {
     }
   };
 
+  const assignServiceAssessor = async () => {
+    const selectedStaff = eligibleAssessors.find((member) => String(member.id) === selectedAssessorId);
+    const assessorId = getPositiveIntegerId(selectedStaff?.id);
+    if (serviceIdentifier === null || assessorId === null) {
+      setAssessorAssignmentFeedback({ error: "Select an assessor with a valid numeric user ID before assigning this service." });
+      return;
+    }
+
+    setAssigningAssessor(true);
+    setAssessorAssignmentFeedback(null);
+    try {
+      const assigned = await assignAssessor({ serviceId: serviceIdentifier, userId: assessorId });
+      if (!assigned) {
+        throw new Error(useManagerStore.getState().error || "Unable to assign the assessor.");
+      }
+      const refreshedService = await fetchServiceById(serviceIdentifier);
+      if (!refreshedService) {
+        throw new Error(useManagerStore.getState().serviceDetailError || "The service could not be refreshed.");
+      }
+      setAssessorAssignmentFeedback({ success: "Assessor assigned successfully." });
+      setActionNotice("Assessor assigned successfully.");
+    } catch (assignmentError: unknown) {
+      setAssessorAssignmentFeedback({
+        error: assignmentError instanceof Error ? assignmentError.message : "Unable to assign the assessor.",
+      });
+    } finally {
+      setAssigningAssessor(false);
+    }
+  };
+
   return (
     <main className="mx-auto max-w-[1600px] space-y-5 text-slate-800">
       <Link
@@ -877,13 +1166,19 @@ export default function ManagerServiceDetailPage() {
         className="inline-flex items-center gap-2 text-sm font-medium text-slate-500 transition hover:text-blue-700"
       >
         <ArrowLeft className="h-4 w-4" />
-        Back to services
+        {copy.backToServices}
       </Link>
 
       {loading && !service && (
-        <p role="status" className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
-          Loading service details...
-        </p>
+        <div role="status" aria-label="Loading service details" className="space-y-4">
+          <span className="sr-only">Loading service details...</span>
+          <div className="h-36 animate-pulse rounded-2xl border border-slate-200 bg-white" />
+          <div className="grid gap-4 xl:grid-cols-[minmax(220px,0.85fr)_minmax(320px,1.35fr)_minmax(240px,0.9fr)]">
+            <div className="h-[34rem] animate-pulse rounded-2xl border border-slate-200 bg-white" />
+            <div className="h-[34rem] animate-pulse rounded-2xl border border-slate-200 bg-white" />
+            <div className="h-[34rem] animate-pulse rounded-2xl border border-slate-200 bg-white" />
+          </div>
+        </div>
       )}
       {displayError && (
         <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -910,14 +1205,14 @@ export default function ManagerServiceDetailPage() {
                       {service.reference_number}
                     </span>
                   )}
-                  <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700">
-                    {currentStage ? currentStageStatus : formatStatus(service.status)}
+                  <span className={`rounded-md border px-2.5 py-1 text-xs font-medium ${stageTone(formatStatus(service.status))}`}>
+                    {serviceStatusLabel}
                   </span>
                   <span className={`rounded-md border px-2.5 py-1 text-xs font-medium ${riskTone(risk)}`}>
-                    {risk}
+                    {riskLabel}
                   </span>
                   <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700">
-                    {mode}
+                    {modeLabel}
                   </span>
                 </div>
                 <div>
@@ -926,7 +1221,7 @@ export default function ManagerServiceDetailPage() {
                   </h2>
                   <p className="mt-1 text-sm text-slate-500">
                     {importer} · {service.route_summary || [service.origin, service.destination].filter(Boolean).join(" → ") || "Route unavailable"}
-                    {(service.estimated_arrival || service.eta) ? ` · ETA ${formatDate(service.estimated_arrival || service.eta)}` : ""}
+                    {(service.estimated_arrival || service.eta) ? ` · ETA ${formatDateOnly(service.estimated_arrival || service.eta)}` : ""}
                   </p>
                 </div>
               </div>
@@ -940,17 +1235,20 @@ export default function ManagerServiceDetailPage() {
                   }}
                   className="inline-flex h-9 items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 text-xs font-medium text-amber-800 transition hover:bg-amber-50"
                 >
-                  Escalate
+                  <Flag className="h-3.5 w-3.5" />
+                  {copy.escalate}
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    importerMessageRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-                    importerMessageRef.current?.focus();
+                    setMessageImporterMode(false);
+                    setShowNotification(true);
+                    setNotificationFeedback(null);
                   }}
-                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+                  className="inline-flex h-9 items-center gap-2 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white transition hover:bg-slate-800"
                 >
-                  Notify importer
+                  <Send className="h-3.5 w-3.5" />
+                  {copy.notifyImporter}
                 </button>
               </div>
               <div className="text-sm text-slate-500">
@@ -968,46 +1266,27 @@ export default function ManagerServiceDetailPage() {
                 </button>
               </div>
             </div>
-            {showEscalation && (
-              <form onSubmit={(event) => void submitEscalation(event)} className="mt-4 space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-4">
-                <label className="block text-xs font-medium text-slate-700">
-                  Escalation reason
-                  <textarea
-                    value={escalationReason}
-                    onChange={(event) => setEscalationReason(event.target.value)}
-                    maxLength={2000}
-                    rows={2}
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                  />
-                </label>
-                {escalationFeedback?.error && <p role="alert" className="text-xs text-red-700">{escalationFeedback.error}</p>}
-                <div className="flex justify-end gap-2">
-                  <button type="button" onClick={() => setShowEscalation(false)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700">
-                    Cancel
-                  </button>
-                  <button type="submit" disabled={escalationSubmitting || !escalationReason.trim()} className="rounded-lg bg-amber-700 px-3 py-2 text-xs font-semibold text-white disabled:cursor-wait disabled:opacity-60">
-                    {escalationSubmitting ? "Submitting..." : "Submit escalation"}
-                  </button>
-                </div>
-              </form>
-            )}
             {escalationFeedback?.success && <p role="status" className="mt-3 text-xs text-emerald-700">{escalationFeedback.success}</p>}
             {workflowStages.length > 0 && (
               <div className="mt-6">
                 <div className="mb-2 flex items-center justify-between text-xs">
                   <span className="font-medium text-slate-500">
                     {currentStage
-                      ? `Stage ${activeStage + 1} of ${workflowStages.length}`
+                      ? `${copy.stage} ${activeStage + 1} ${copy.of} ${workflowStages.length}`
                       : `${completedStages} of ${workflowStages.length} stages completed`}
                   </span>
-                  <span className="font-semibold text-slate-800">{progress === null ? "—" : `${progress}%`}</span>
+                  <span className="font-semibold text-slate-800">
+                    {progress === null ? "—" : `${progress}% ${copy.complete}`}
+                  </span>
                 </div>
                 <div className="flex h-2 gap-1 overflow-hidden rounded-full bg-slate-100">
                   {workflowStages.map((stage, index) => {
-                    const segmentTone = index < activeStage
+                    const status = stageStatus(stage).toLowerCase();
+                    const isComplete = status.includes("complete") || status.includes("deliver");
+                    const segmentTone = isComplete
                       ? "bg-emerald-600"
                       : index === activeStage
-                        ? "bg-amber-500"
+                        ? "bg-sky-600"
                         : "bg-slate-200";
                     return <span key={stage.id ?? `${stage.order ?? index}-${index}`} className={`h-full min-w-0 flex-1 ${segmentTone}`} />;
                   })}
@@ -1017,9 +1296,9 @@ export default function ManagerServiceDetailPage() {
           </section>
 
           <section className="grid min-h-140 gap-4 xl:grid-cols-[minmax(220px,0.85fr)_minmax(320px,1.35fr)_minmax(240px,0.9fr)]">
-            <aside className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <aside className="max-h-[calc(100vh-12rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
-                {isUnimodal ? "Unimodal workflow" : "Multimodal workflow"}
+                {isUnimodal ? copy.unimodalWorkflow : copy.multimodalWorkflow}
               </p>
               {workflowStages.length ? (
                 <ol className="mt-4 space-y-1">
@@ -1039,9 +1318,9 @@ export default function ManagerServiceDetailPage() {
                           <span className="min-w-0">
                             <span className="block text-sm font-semibold text-slate-900">
                               <span className="mr-2 font-mono text-xs font-medium text-slate-400">{String(stage.order ?? index + 1).padStart(2, "0")}</span>
-                              {displayStageName(stage, index)}
+                              {localizedStageName(stage, index)}
                             </span>
-                            <span className="mt-0.5 block text-xs text-slate-500">{status}</span>
+                            <span className="mt-0.5 block text-xs text-slate-500">{localizedStageStatus(status)}</span>
                           </span>
                         </button>
                       </li>
@@ -1058,24 +1337,24 @@ export default function ManagerServiceDetailPage() {
             <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Stage workspace</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{copy.stageWorkspace}</p>
                   <h2 className="mt-1 text-lg font-semibold text-slate-900">
-                    {currentStage ? displayStageName(currentStage, activeStage) : "Service details"}
+                    {currentStage ? localizedStageName(currentStage, activeStage) : "Service details"}
                   </h2>
                 </div>
                 {currentStage && (
                   <span className={`rounded-lg border px-3 py-1.5 text-xs font-medium ${stageTone(currentStageStatus)}`}>
-                    {currentStageStatus}
+                    {currentStageStatusLabel}
                   </span>
                 )}
               </div>
 
               <div className="mt-5 flex flex-wrap gap-2 border-b border-slate-200 pb-3">
                 {([
-                  ["stage", "Stage work", null],
-                  ["documents", "Documents", service.documents.length],
-                  ["discussion", "Discussion", stageDiscussions.length],
-                  ["consignment", "Consignment", null],
+                  ["stage", copy.stageWork, null],
+                  ["documents", copy.documents, service.documents.length],
+                  ["discussion", copy.discussion, stageDiscussions.length || currentStage?.discussionCount || 0],
+                  ["consignment", copy.consignment, null],
                 ] as const).map(([tab, label, count]) => (
                   <button
                     key={tab}
@@ -1099,7 +1378,38 @@ export default function ManagerServiceDetailPage() {
 
               <div className="mt-4 space-y-4">
                 {activeTab === "documents" ? (
-                  <DocumentsPanel documents={service.documents} error={documentsError} />
+                  <div className="space-y-3">
+                    {documentActionError && (
+                      <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                        {documentActionError}
+                      </p>
+                    )}
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelection({
+                            serviceId: id,
+                            activeStage,
+                            activeTab: "stage",
+                            stageSelected: hasManualStageSelection,
+                          });
+                          window.setTimeout(() => stageFileInput.current?.click(), 0);
+                        }}
+                        className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800"
+                      >
+                        <UploadCloud className="h-3.5 w-3.5" />
+                        Upload document
+                      </button>
+                    </div>
+                    <DocumentsPanel
+                      documents={service.documents}
+                      error={documentsError}
+                      actionBusy={documentActionBusy}
+                      onPreview={(document) => void previewServiceDocument(document)}
+                      onDownload={(document) => void downloadServiceDocument(document)}
+                    />
+                  </div>
                 ) : activeTab === "discussion" ? (
                   <div className="space-y-4">
                     {stageDiscussionsError && (
@@ -1122,7 +1432,7 @@ export default function ManagerServiceDetailPage() {
                           </div>
                           <p className="mt-2 whitespace-pre-wrap text-sm text-slate-600">{message.comment || "No comment content."}</p>
                           <p className="mt-2 text-xs text-slate-500">
-                            {message.author || "Author unavailable"}
+                            {message.author || "Author unavailable"}{message.role ? ` · ${message.role}` : ""}
                           </p>
                         </li>
                       ))}
@@ -1160,7 +1470,7 @@ export default function ManagerServiceDetailPage() {
                   </div>
                 ) : activeTab === "consignment" ? (
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-                    <p className="text-sm font-medium text-slate-800">Consignment details</p>
+                    <p className="text-sm font-medium text-slate-800">{copy.consignment}</p>
                     {consignmentLoading ? (
                       <p role="status" className="mt-3 text-sm text-slate-500">Loading consignment details...</p>
                     ) : (
@@ -1172,8 +1482,8 @@ export default function ManagerServiceDetailPage() {
                         )}
                         <dl className="mt-4 grid gap-4 sm:grid-cols-2">
                           <DetailField label="Description" value={consignmentDetails?.description || service.description || "—"} />
-                          <DetailField label="Origin" value={consignmentDetails?.countryOfOrigin || consignmentDetails?.origin || service.countryOfOrigin || service.origin || "—"} />
-                          <DetailField label="Destination" value={consignmentDetails?.destination || service.destination || service.routeCategory || "—"} />
+                          <DetailField label={copy.origin} value={consignmentDetails?.countryOfOrigin || consignmentDetails?.origin || service.countryOfOrigin || service.origin || "—"} />
+                          <DetailField label={copy.destination} value={consignmentDetails?.destination || service.destination || service.routeCategory || "—"} />
                           <DetailField
                             label="Declared value"
                             value={consignmentDetails?.declaredValue === null || consignmentDetails?.declaredValue === undefined
@@ -1183,6 +1493,11 @@ export default function ManagerServiceDetailPage() {
                               : String(consignmentDetails.declaredValue)}
                           />
                           <DetailField label="Tax category" value={consignmentDetails?.taxCategory || service.taxCategory || "—"} />
+                          <DetailField label="TIN" value={service.importer?.tin || "—"} />
+                          <DetailField label={copy.mode} value={modeLabel} />
+                          <DetailField label="Carrier / vessel / flight" value={logisticsCarrier} />
+                          <DetailField label="Container / reference" value={String(service.containerNumber ?? service.reference_number ?? "—")} />
+                          <DetailField label="ETA" value={formatDateOnly(service.estimated_arrival || service.eta)} />
                           <DetailField label="Registered" value={formatDate(consignmentDetails?.registeredDate || service.createAt)} />
                         </dl>
                       </>
@@ -1194,58 +1509,66 @@ export default function ManagerServiceDetailPage() {
                       <section className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                         {previousStage ? (
                           <>
-                          <h3 className="text-sm font-semibold text-slate-900">Previous stage summary</h3>
+                          <div className="flex items-center justify-between gap-2">
+                            <h3 className="text-sm font-semibold text-slate-900">{copy.previousStageSummary}</h3>
+                            <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{copy.carriedForwardContext}</span>
+                          </div>
                           <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                             <p className="text-sm font-medium text-slate-700">
-                              {displayStageName(previousStage, activeStage - 1)}
+                              {previousStageSummary?.stageName
+                                ? formatActivityLabel(previousStageSummary.stageName)
+                                : localizedStageName(previousStage, activeStage - 1)}
                             </p>
-                            <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${stageTone(stageStatus(previousStage))}`}>
-                              {stageStatus(previousStage)}
+                            <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${stageTone(previousStageSummaryStatus)}`}>
+                              {localizedStageStatus(previousStageSummaryStatus)}
                             </span>
                           </div>
                           <p className="mt-2 whitespace-pre-wrap text-sm text-slate-600">
-                            {previousStage.notes || previousStage.comments || "No summary or carried-over note is available."}
+                            {previousStageSummaryNote || "No summary or carried-over note is available."}
                           </p>
                           <p className="mt-2 text-xs text-slate-500">
-                            Last updated {formatDate(previousStage.updated_at || previousStage.updatedAt || previousStage.completedAt || previousStage.createdAt)}
+                            {previousStageSummaryStatus.toLowerCase().includes("complete")
+                              ? `Completed ${formatDate(previousStageSummary?.completedAt || previousStage.completedAt || previousStage.updatedAt || previousStage.updated_at)} · took ${
+                                  previousStageSummary?.durationHours !== null && previousStageSummary?.durationHours !== undefined
+                                    ? formatDurationHours(previousStageSummary.durationHours)
+                                    : formatDuration(previousStage.startedAt || previousStage.createdAt, previousStage.completedAt || previousStage.updatedAt)
+                                } · ${previousStageSummary?.completedByName || personName(service.assignedCaseExecutor)}`
+                              : `In flight · ${personName(service.assignedCaseExecutor)}`}
                           </p>
                           </>
                         ) : (
                           <>
-                            <h3 className="text-sm font-semibold text-slate-900">Previous stage summary</h3>
+                            <h3 className="text-sm font-semibold text-slate-900">{copy.previousStageSummary}</h3>
                             <p className="mt-2 text-sm text-slate-500">No previous stage summary is available.</p>
                           </>
                         )}
                       </section>
                       <section className="rounded-xl border border-slate-200 p-4">
                           <div className="flex flex-wrap items-center justify-between gap-2">
-                            <h3 className="text-sm font-semibold text-slate-900">Required documents for this stage</h3>
-                            {stageDocuments.length > 0 && (
-                              <span className="text-xs text-slate-500">
-                                {stageDocuments.filter((document) => document.isVerified).length} of {stageDocuments.length} verified
-                              </span>
-                            )}
+                            <h3 className="text-sm font-semibold text-slate-900">{copy.requiredDocuments}</h3>
+                            <span className="text-xs text-slate-500">
+                              {requiredStageDocuments.filter((document) =>
+                                document.documentId !== null || document.status.toLowerCase() === "received",
+                              ).length} of {requiredStageDocuments.length} received
+                            </span>
                           </div>
                           {documentsError && (
                             <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
                               Unable to load stage documents: {documentsError}
                             </p>
                           )}
-                          {stageDocuments.length ? (
+                          {requiredStageDocuments.length ? (
                             <ul className="mt-3 divide-y divide-slate-100">
-                              {stageDocuments.map((document, index) => {
-                                const pending = String(document.status ?? "").toLowerCase().includes("pending")
-                                  || (!document.fileName && !document.originalFileName && !document.isVerified);
+                              {requiredStageDocuments.map((document, index) => {
+                                const received = document.documentId !== null
+                                  || document.status.toLowerCase() === "received";
                                 return (
-                                  <li key={document.id ?? `${document.fileName}-${index}`} className="flex flex-wrap items-center justify-between gap-2 py-2">
-                                    <span className="text-sm text-slate-700">
-                                      {document.originalFileName || document.fileName || `Document ${index + 1}`}
-                                      {document.isRequired ? <span className="ml-2 text-xs text-slate-500">Required</span> : null}
-                                    </span>
+                                  <li key={`${document.documentType}-${index}`} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                                    <span className="text-sm text-slate-700">{document.documentType}</span>
                                     <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                                      pending ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-700"
+                                      received ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"
                                     }`}>
-                                      {pending ? "Pending" : "Received"}
+                                      {received ? copy.received : copy.outstanding}
                                     </span>
                                   </li>
                                 );
@@ -1259,7 +1582,7 @@ export default function ManagerServiceDetailPage() {
                         <input
                           ref={stageFileInput}
                           type="file"
-                          accept=".pdf,.jpg,.png,.xlsx"
+                          accept=".pdf,.jpg,.jpeg,.png,.xlsx"
                           className="hidden"
                           disabled={stageUploadBusy || !hasCurrentStageDocumentId}
                           onChange={(event) => selectStageFile(event.target.files?.[0] ?? null)}
@@ -1285,7 +1608,7 @@ export default function ManagerServiceDetailPage() {
                           <UploadCloud className="h-7 w-7 text-slate-500" />
                           <h3 className="mt-2 text-sm font-semibold text-slate-900">Attach stage documents</h3>
                           <p className="mt-1 text-xs text-slate-500">
-                            Drag files here, or browse. PDF, JPG, PNG, XLSX up to 25 MB each.
+                            {copy.uploadDescription}
                           </p>
                           {!hasCurrentStageDocumentId && (
                             <p className="mt-2 text-xs text-amber-700">
@@ -1299,9 +1622,27 @@ export default function ManagerServiceDetailPage() {
                             className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-60"
                           >
                             {stageUploadBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
-                            {stageUploadBusy ? "Uploading..." : "Browse files"}
+                            {stageUploadBusy ? `Uploading ${uploadProgress ?? 0}%` : copy.browseFiles}
                           </button>
                         </div>
+                        <label className="mt-3 block text-xs font-medium text-slate-700">
+                          {copy.documentType}
+                          <select
+                            value={currentDocumentType}
+                            onChange={(event) => setDocumentType(event.target.value)}
+                            disabled={stageUploadBusy}
+                            className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800"
+                          >
+                            {stageDocumentTypes.map((type) => (
+                              <option key={type} value={type}>{type}</option>
+                            ))}
+                          </select>
+                        </label>
+                        {stageUploadBusy && (
+                          <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-valuenow={uploadProgress ?? 0} aria-valuemin={0} aria-valuemax={100}>
+                            <span className="block h-full bg-blue-600 transition-all" style={{ width: `${uploadProgress ?? 0}%` }} />
+                          </div>
+                        )}
                         {selectedStageFile && (
                           <p className="mt-3 truncate text-sm text-slate-700">
                             Selected: <span className="font-medium">{selectedStageFile.name}</span>
@@ -1330,18 +1671,9 @@ export default function ManagerServiceDetailPage() {
                           </button>
                         </div>
                       </section>
-                      <div className="space-y-4 rounded-xl border border-slate-200 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <h3 className="text-sm font-semibold text-slate-900">{displayStageName(currentStage, activeStage)}</h3>
-                          <p className="mt-1 text-sm text-slate-500">{stageStatus(currentStage)}</p>
-                          </div>
-                        </div>
-                        {stageIcon(currentStageStatus)}
-                      </div>
-                      <dl className="grid gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
+                      <dl className="grid gap-4 rounded-xl border border-slate-200 px-4 py-3 sm:grid-cols-3">
                         <DetailField label="Created" value={formatDate(currentStage.createdAt)} />
-                        <DetailField label="Last updated" value={formatDate(currentStage.updatedAt)} />
+                        <DetailField label="Last updated" value={formatDate(currentStage.updatedAt || currentStage.updated_at)} />
                         <DetailField label="Completed" value={formatDate(currentStage.completedAt)} />
                       </dl>
                       {(currentStage.notes || currentStage.comments) && (
@@ -1360,8 +1692,8 @@ export default function ManagerServiceDetailPage() {
                         className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4"
                       >
                         <div>
-                          <h3 className="text-sm font-semibold text-slate-900">Update stage</h3>
-                          <p className="mt-1 text-xs text-slate-500">Changes are written to the audit trail.</p>
+                          <h3 className="text-sm font-semibold text-slate-900">{copy.updateStage}</h3>
+                          <p className="mt-1 text-xs text-slate-500">{copy.auditTrail}</p>
                         </div>
                         {!hasCurrentStageExecution && (
                           <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
@@ -1369,7 +1701,7 @@ export default function ManagerServiceDetailPage() {
                           </p>
                         )}
                         <label className="block text-xs font-medium text-slate-700">
-                          Stage status
+                          {copy.stageStatus}
                           <select
                             value={stageStatusDraft}
                             disabled={stageSaving || !hasCurrentStageExecution}
@@ -1386,14 +1718,16 @@ export default function ManagerServiceDetailPage() {
                             }}
                             className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                           >
-                            <option value="NeedsReview">Needs review</option>
-                            <option value="Pending">Pending</option>
-                            <option value="Completed">Completed</option>
-                            <option value="Blocked">Blocked</option>
+                            <option value="NotStarted">{localizedStageStatus("Not started")}</option>
+                            <option value="InProgress">{localizedStageStatus("In progress")}</option>
+                            <option value="NeedsReview">{localizedStageStatus("Needs review")}</option>
+                            <option value="RequiresCustomerAction">{localizedStageStatus("Requires customer action")}</option>
+                            <option value="Completed">{localizedStageStatus("Completed")}</option>
+                            <option value="Blocked">{localizedStageStatus("Blocked")}</option>
                           </select>
                         </label>
                         <label className="block text-xs font-medium text-slate-700">
-                          Risk channel
+                          {copy.riskChannel}
                           <select
                             value={stageRiskDraft}
                             disabled={stageSaving || !hasCurrentStageExecution}
@@ -1411,14 +1745,14 @@ export default function ManagerServiceDetailPage() {
                             className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                           >
                             <option value="">Select risk channel</option>
-                            <option value="green">Green — direct release</option>
-                            <option value="yellow">Yellow — documentary check</option>
-                            <option value="red">Red — physical inspection</option>
-                            <option value="blue">Blue — fast track</option>
+                            <option value="green">{copy.greenRisk}</option>
+                            <option value="yellow">{copy.yellowRisk}</option>
+                            <option value="blue">{copy.blueRisk}</option>
+                            <option value="red">{copy.redRisk}</option>
                           </select>
                         </label>
                         <label className="block text-xs font-medium text-slate-700">
-                          Stage note
+                          {copy.stageNote}
                           <textarea
                             value={stageNotesDraft}
                             disabled={!hasCurrentStageExecution}
@@ -1435,7 +1769,7 @@ export default function ManagerServiceDetailPage() {
                             }}
                             maxLength={2000}
                             rows={3}
-                            placeholder="Describe what was done, any exception found, and the next step."
+                            placeholder={copy.stageNotePlaceholder}
                             className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                           />
                         </label>
@@ -1445,25 +1779,29 @@ export default function ManagerServiceDetailPage() {
                           <button
                             type="submit"
                             disabled={stageSaving || !hasCurrentStageExecution}
-                            className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-60"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
                           >
-                            {stageSaving ? "Saving..." : "Save draft"}
+                            {stageSaving ? "Saving..." : copy.saveDraft}
                           </button>
                           <button
                             type="button"
                             onClick={() => void submitStageUpdate("Completed", true)}
                             disabled={stageSaving || !hasCurrentStageExecution}
-                            className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60"
+                            className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:cursor-wait disabled:opacity-60"
                           >
-                            Save & advance stage
+                            {copy.saveAdvance}
                           </button>
                           <button
                             type="button"
-                            onClick={() => void submitStageUpdate("Blocked")}
+                            onClick={() => {
+                              if (window.confirm("Mark this stage as blocked and submit an escalation?")) {
+                                void submitStageUpdate("Blocked");
+                              }
+                            }}
                             disabled={stageSaving || !hasCurrentStageExecution}
                             className="rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60"
                           >
-                            Mark blocked
+                            {copy.markBlocked}
                           </button>
                         </div>
                       </form>
@@ -1474,7 +1812,7 @@ export default function ManagerServiceDetailPage() {
                       <dl className="mt-4 grid gap-4 sm:grid-cols-2">
                         <DetailField label="Description" value={service.description || "—"} />
                         <DetailField label="Service status" value={formatStatus(service.status)} />
-                        <DetailField label="Service mode" value={mode} />
+                        <DetailField label="Service mode" value={modeLabel} />
                         <DetailField label="Registered" value={formatDate(service.createAt)} />
                         <DetailField label="Declared value" value={service.declaredValue === null || service.declaredValue === undefined ? "—" : String(service.declaredValue)} />
                         <DetailField label="Tax category" value={service.taxCategory || "—"} />
@@ -1487,60 +1825,42 @@ export default function ManagerServiceDetailPage() {
 
             <aside className="space-y-4">
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Importer</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{copy.importer}</p>
                 <h2 className="mt-2 text-sm font-semibold text-slate-900">{importer}</h2>
                 <p className="mt-1 break-all text-xs text-slate-500">
-                  {service.importer?.customer_code || "—"} · TIN {service.importer?.tin || "—"}
+                  {service.importer?.customer_code || "—"} · {copy.tin} {service.importer?.tin || "—"}
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
                   {service.importer?.contact_person || "—"} · {service.importer?.phone || "—"}
                 </p>
-                <form onSubmit={(event) => void submitImporterNotification(event)} className="mt-4 space-y-2 border-t border-slate-100 pt-4">
-                  <label className="block text-xs font-medium text-slate-600">
-                    Notification type (optional)
-                    <input
-                      value={notificationType}
-                      onChange={(event) => setNotificationType(event.target.value)}
-                      maxLength={100}
-                      placeholder="e.g. Service update"
-                      className="mt-1 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-normal text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    />
-                  </label>
-                  <label className="block text-xs font-medium text-slate-600">
-                    Message
-                    <textarea
-                      ref={importerMessageRef}
-                      value={notificationMessage}
-                      onChange={(event) => setNotificationMessage(event.target.value)}
-                      rows={3}
-                      maxLength={2000}
-                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    />
-                  </label>
-                  {notificationFeedback?.error && <p role="alert" className="text-xs text-red-700">{notificationFeedback.error}</p>}
-                  {notificationFeedback?.success && <p role="status" className="text-xs text-emerald-700">{notificationFeedback.success}</p>}
-                  <button
-                    type="submit"
-                    disabled={notificationSubmitting || !notificationMessage.trim()}
-                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
-                  >
-                    {notificationSubmitting && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
-                    {notificationSubmitting ? "Sending..." : "Notify importer"}
-                  </button>
-                </form>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMessageImporterMode(true);
+                    setShowNotification(true);
+                    setNotificationFeedback(null);
+                  }}
+                  className="mt-4 inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  {copy.messageImporter}
+                </button>
               </section>
 
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Assigned staff</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{copy.assignedStaff}</p>
                 <div className="mt-3 space-y-3">
                   {assignedStaff.map(([role, staffMember]) => {
                     const staffName = personName(staffMember);
                     return (
                       <div key={role} className="flex items-center gap-3">
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
+                        <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
                           {staffName === "Not assigned"
                             ? "—"
                             : staffName.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}
+                          {staffName !== "Not assigned" && staffMember?.is_active !== false && (
+                            <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-white bg-emerald-500" />
+                          )}
                         </span>
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium text-slate-900">{staffName}</p>
@@ -1552,7 +1872,7 @@ export default function ManagerServiceDetailPage() {
                 </div>
                 <div className="mt-4 space-y-2 border-t border-slate-100 pt-4">
                   <label htmlFor="case-executor" className="block text-xs font-medium text-slate-600">
-                    Assign case executor
+                    {copy.assignCaseExecutor}
                   </label>
                   <select
                     id="case-executor"
@@ -1564,7 +1884,7 @@ export default function ManagerServiceDetailPage() {
                     disabled={staffLoading || assigningExecutor}
                     className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-800 disabled:cursor-wait disabled:opacity-60"
                   >
-                    <option value="">Select a case executor</option>
+                    <option value="">{copy.selectCaseExecutor}</option>
                     {eligibleExecutors.map((member) => (
                       <option key={member.id} value={member.id}>
                         {personName(member)}
@@ -1585,7 +1905,40 @@ export default function ManagerServiceDetailPage() {
                     className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-blue-700 px-3 text-xs font-semibold text-white transition hover:bg-blue-800 disabled:cursor-wait disabled:opacity-60"
                   >
                     {assigningExecutor && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
-                    {assigningExecutor ? "Assigning..." : "Assign executor"}
+                    {assigningExecutor ? copy.assigning : copy.assignExecutor}
+                  </button>
+                  <label htmlFor="service-assessor" className="block pt-2 text-xs font-medium text-slate-600">
+                    {copy.assignAssessor}
+                  </label>
+                  <select
+                    id="service-assessor"
+                    value={selectedAssessorId}
+                    onChange={(event) => setAssessorSelection({
+                      serviceId: id,
+                      assessorId: event.target.value,
+                    })}
+                    disabled={staffLoading || assigningAssessor}
+                    className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-800 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    <option value="">{copy.selectAssessor}</option>
+                    {eligibleAssessors.map((member) => (
+                      <option key={member.id} value={member.id}>{personName(member)}</option>
+                    ))}
+                  </select>
+                  {assessorAssignmentFeedback?.error && (
+                    <p role="alert" className="text-xs text-red-700">{assessorAssignmentFeedback.error}</p>
+                  )}
+                  {assessorAssignmentFeedback?.success && (
+                    <p role="status" className="text-xs text-emerald-700">{assessorAssignmentFeedback.success}</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void assignServiceAssessor()}
+                    disabled={!selectedAssessorId || staffLoading || assigningAssessor}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {assigningAssessor && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+                    {assigningAssessor ? copy.assigning : copy.assignAssessor}
                   </button>
                 </div>
               </section>
@@ -1593,9 +1946,9 @@ export default function ManagerServiceDetailPage() {
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="h-4 w-4 text-slate-500" />
-                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Risk & compliance</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{copy.riskCompliance}</p>
                 </div>
-                <p className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700">{risk}</p>
+                <p className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700">{riskLabel}</p>
                 {riskDescription && <p className="mt-2 text-xs leading-5 text-slate-600">{riskDescription}</p>}
                 {service.isBlocked && <p className="mt-2 text-xs font-medium text-red-700">This service is blocked.</p>}
                 {service.requiresCustomerAction && <p className="mt-2 text-xs font-medium text-amber-700">Customer action is required.</p>}
@@ -1604,20 +1957,21 @@ export default function ManagerServiceDetailPage() {
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-center gap-2">
                   {mode === "Unimodal" ? <Truck className="h-4 w-4 text-slate-500" /> : <MapPin className="h-4 w-4 text-slate-500" />}
-                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Logistics</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{copy.logistics}</p>
                 </div>
                 <dl className="mt-3 space-y-3">
-                  <DetailField label="Origin" value={service.origin || service.countryOfOrigin || "—"} />
-                  <DetailField label="Destination" value={service.destination || "—"} />
+                  <DetailField label={copy.carrier} value={logisticsCarrier} />
+                  <DetailField label={copy.origin} value={service.origin || service.countryOfOrigin || "—"} />
+                  <DetailField label={copy.destination} value={service.destination || "—"} />
                   <DetailField label="Route category" value={service.routeCategory || service.route_summary || "—"} />
-                  <DetailField label="Estimated arrival" value={formatDate(service.estimated_arrival || service.eta)} />
+                  <DetailField label="ETA" value={formatDateOnly(service.estimated_arrival || service.eta)} />
                 </dl>
               </section>
 
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-center gap-2">
                   <Clock3 className="h-4 w-4 text-slate-500" />
-                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Recent activity</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{copy.recentActivity}</p>
                 </div>
                 {serviceActivitiesError && (
                   <p role="alert" className="mt-3 text-xs text-red-700">
@@ -1628,8 +1982,11 @@ export default function ManagerServiceDetailPage() {
                   <ol className="mt-3 space-y-3">
                     {displayedActivities.map((activity, index) => (
                       <li key={`${activity.date}-${activity.label}-${index}`} className="border-l-2 border-slate-200 pl-3">
-                        <p className="text-xs font-medium text-slate-700">{activity.label}</p>
-                        <time className="mt-0.5 block text-[11px] text-slate-500">{formatDate(activity.date)}</time>
+                        <p className="text-xs font-medium text-slate-700">
+                          › {formatActivityLabel(activity.label)}
+                          {"actorName" in activity && activity.actorName ? ` · ${activity.actorName}` : ""}
+                        </p>
+                        <time className="mt-0.5 block text-[11px] text-slate-500">{formatRelativeTime(activity.date)}</time>
                       </li>
                     ))}
                   </ol>
@@ -1640,6 +1997,124 @@ export default function ManagerServiceDetailPage() {
             </aside>
           </section>
         </>
+      )}
+      {showEscalation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="escalation-title"
+            onSubmit={(event) => void submitEscalation(event)}
+            className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-xl"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 id="escalation-title" className="text-lg font-semibold text-slate-900">{copy.escalate} service</h2>
+                <p className="mt-1 text-sm text-slate-500">Provide the reason to submit this escalation to the manager service.</p>
+              </div>
+              <button type="button" aria-label="Close escalation" onClick={() => setShowEscalation(false)} className="rounded-md p-1 text-slate-500 hover:bg-slate-100">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <label className="block text-sm font-medium text-slate-700">
+              Escalation reason
+              <textarea
+                required
+                value={escalationReason}
+                onChange={(event) => setEscalationReason(event.target.value)}
+                maxLength={2000}
+                rows={4}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+            </label>
+            {escalationFeedback?.error && <p role="alert" className="text-sm text-red-700">{escalationFeedback.error}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowEscalation(false)} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">
+                {copy.cancel}
+              </button>
+              <button type="submit" disabled={escalationSubmitting || !escalationReason.trim()} className="rounded-lg bg-amber-700 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                {escalationSubmitting ? "Submitting..." : copy.submitEscalation}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {showNotification && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notification-title"
+            onSubmit={(event) => void submitImporterNotification(event)}
+            className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-xl"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 id="notification-title" className="text-lg font-semibold text-slate-900">
+                  {messageImporterMode ? copy.messageImporter : copy.notifyImporter}
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">{importer}</p>
+              </div>
+              <button type="button" aria-label="Close notification" onClick={() => setShowNotification(false)} className="rounded-md p-1 text-slate-500 hover:bg-slate-100">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <label className="block text-sm font-medium text-slate-700">
+              Subject
+              <input
+                value={notificationType}
+                onChange={(event) => setNotificationType(event.target.value)}
+                maxLength={100}
+                placeholder="Service update"
+                className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+            </label>
+            <label className="block text-sm font-medium text-slate-700">
+              Message
+              <textarea
+                ref={importerMessageRef}
+                required
+                value={notificationMessage}
+                onChange={(event) => setNotificationMessage(event.target.value)}
+                rows={5}
+                maxLength={2000}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+            </label>
+            {notificationFeedback?.error && <p role="alert" className="text-sm text-red-700">{notificationFeedback.error}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowNotification(false)} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">
+                {copy.cancel}
+              </button>
+              <button type="submit" disabled={notificationSubmitting || !notificationMessage.trim()} className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                {notificationSubmitting && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                {notificationSubmitting ? "Sending..." : copy.send}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {previewUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <section role="dialog" aria-modal="true" aria-labelledby="document-preview-title" className="flex h-[min(90vh,900px)] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-xl">
+            <header className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+              <h2 id="document-preview-title" className="truncate text-sm font-semibold text-slate-900">{previewName}</h2>
+              <button type="button" aria-label="Close preview" onClick={() => setPreviewUrl(null)} className="rounded-md p-1 text-slate-500 hover:bg-slate-100">
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <iframe title={previewName} src={previewUrl} className="min-h-0 flex-1" />
+          </section>
+        </div>
+      )}
+      {actionNotice && (
+        <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[60] flex max-w-sm items-center gap-3 rounded-lg bg-slate-900 px-4 py-3 text-sm text-white shadow-lg">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+          <span>{actionNotice}</span>
+          <button type="button" aria-label="Dismiss notification" onClick={() => setActionNotice("")} className="rounded p-1 hover:bg-white/10">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       )}
     </main>
   );

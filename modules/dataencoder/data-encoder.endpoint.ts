@@ -20,7 +20,7 @@ const readProxyResponse = async (
     }
   }
 
-  if (!response.ok) {
+  if (!response.ok && response.status !== 400 && response.status !== 409) {
     if (typeof body === "string" && body.trim()) {
       throw new Error(body);
     }
@@ -275,6 +275,28 @@ export const DataEncoderEndpoints = {
     }
   },
 
+  updateCustomer: async (payload: Record<string, unknown>) => {
+    const normalizedPayload = normalizeCustomerCreatePayload(payload);
+    return fetch("/api/encoder/customers", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(normalizedPayload),
+    });
+  },
+
+  uploadCustomerKycDocument: (
+    customerId: string | number,
+    payload: FormData,
+  ) =>
+    fetch(
+      `/api/encoder/customer-documents?customerId=${encodeURIComponent(String(customerId))}`,
+      {
+        method: "POST",
+        credentials: "include",
+        body: payload,
+      },
+    ),
+
   createCustomerAccount: (payload: FormData) =>
     fetch("/api/encoder/users", {
       method: "POST",
@@ -346,6 +368,13 @@ export const DataEncoderEndpoints = {
       `/api/encoder/services/${encodeURIComponent(String(serviceId))}/documents`,
       "Service documents",
     ),
+
+  uploadStageDocument: (payload: FormData) =>
+    fetch("/api/encoder/documents", {
+      method: "POST",
+      credentials: "include",
+      body: payload,
+    }),
 
   // GET /api/v1/Document/DownloadDocument?documentId={id}
   downloadDocument: (documentId: number | string) =>

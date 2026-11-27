@@ -73,7 +73,11 @@ const sanitizeUserData = (value: unknown): unknown => {
   );
 };
 
-const readAccessToken = async (): Promise<string | null> => {
+const readAccessToken = async (request: Request): Promise<string | null> => {
+  const authorization = request.headers.get("authorization");
+  const bearerToken = authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (bearerToken) return bearerToken;
+
   const cookieStore = await cookies();
   return (
     cookieStore.get("accessToken")?.value ??
@@ -183,7 +187,7 @@ export async function GET(request: Request, { params }: RouteContext) {
     return jsonResponse({ error: "Unknown encoder resource." }, 404);
   }
 
-  const accessToken = await readAccessToken();
+  const accessToken = await readAccessToken(request);
   if (!accessToken) {
     return jsonResponse({ error: "Authentication required." }, 401);
   }
@@ -236,13 +240,84 @@ export async function GET(request: Request, { params }: RouteContext) {
 
 export async function POST(request: Request, { params }: RouteContext) {
   const { subview } = await params;
-  if (subview !== "customers" && subview !== "shipments" && subview !== "users") {
+  if (
+    subview !== "customers" &&
+    subview !== "shipments" &&
+    subview !== "users" &&
+    subview !== "customer-documents"
+  ) {
     return jsonResponse({ error: "Unknown encoder submission." }, 404);
   }
 
-  const accessToken = await readAccessToken();
+  const accessToken = await readAccessToken(request);
   if (!accessToken) {
     return jsonResponse({ error: "Authentication required." }, 401);
+  }
+
+  const backendUrl = normalizeApiBaseUrl(
+    process.env.BACKEND_API_URL ?? process.env.NEXT_PUBLIC_API_URL,
+  );
+
+  if (subview === "customer-documents") {
+    const customerId = new URL(request.url).searchParams.get("customerId")?.trim() ?? "";
+    if (!/^[1-9]\d*$/.test(customerId) || !Number.isSafeInteger(Number(customerId))) {
+      return jsonResponse({ error: "A valid customer ID is required." }, 400);
+    }
+
+    let submittedForm: FormData;
+    try {
+      submittedForm = await request.formData();
+    } catch {
+      return jsonResponse({ error: "A valid KYC document form is required." }, 400);
+    }
+
+    const file = submittedForm.get("file");
+    const documentType = submittedForm.get("documentType");
+    if (typeof file === "string" || !file || file.size === 0) {
+      return jsonResponse({ error: "Choose a KYC document to upload." }, 400);
+    }
+    if (
+      typeof documentType !== "string" ||
+      !["Business License", "Import License", "TIN Certificate"].includes(documentType)
+    ) {
+      return jsonResponse({ error: "Choose a supported KYC document type." }, 400);
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      return jsonResponse({ error: "KYC documents must be 25 MB or smaller." }, 400);
+    }
+
+    const expiresAt = submittedForm.get("expiresAt");
+    if (typeof expiresAt === "string" && expiresAt.trim()) {
+      if (Number.isNaN(Date.parse(expiresAt))) {
+        return jsonResponse({ error: "Enter a valid expiry date." }, 400);
+      }
+      submittedForm.set("expiresAt", new Date(expiresAt).toISOString());
+    } else {
+      submittedForm.delete("expiresAt");
+    }
+
+    try {
+      const response = await fetch(
+        `${backendUrl}/DataEncoder/customers/${customerId}/documents`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + accessToken,
+            Accept: "application/json",
+          },
+          body: submittedForm,
+          cache: "no-store",
+          signal: AbortSignal.timeout(20_000),
+        },
+      );
+      return jsonResponse(normalizeFlags(await readJsonBody(response)), response.status);
+    } catch (error: unknown) {
+      console.error("Data encoder KYC document upload failed:", error);
+      return jsonResponse(
+        { error: "Unable to reach the backend to upload the KYC document." },
+        502,
+      );
+    }
   }
 
   if (subview === "users") {
@@ -288,9 +363,6 @@ export async function POST(request: Request, { params }: RouteContext) {
       return jsonResponse({ error: "The profile photo must be 5 MB or smaller." }, 400);
     }
 
-    const backendUrl = normalizeApiBaseUrl(
-      process.env.BACKEND_API_URL ?? process.env.NEXT_PUBLIC_API_URL,
-    );
     const payload = new FormData();
     payload.set("Username", username);
     payload.set("FirstName", firstName);
@@ -390,9 +462,6 @@ export async function POST(request: Request, { params }: RouteContext) {
     } else {
       values.importLicenseExpiry = null;
     }
-    const backendUrl = normalizeApiBaseUrl(
-      process.env.BACKEND_API_URL ?? process.env.NEXT_PUBLIC_API_URL,
-    );
     try {
       values.createdByDataEncoderId = await getDataEncoderUserId(backendUrl, accessToken);
     } catch (error: unknown) {
@@ -482,7 +551,7 @@ export async function PUT(request: Request, { params }: RouteContext) {
     return jsonResponse({ error: "Unknown encoder update target." }, 404);
   }
 
-  const accessToken = await readAccessToken();
+  const accessToken = await readAccessToken(request);
   if (!accessToken) {
     return jsonResponse({ error: "Authentication required." }, 401);
   }
